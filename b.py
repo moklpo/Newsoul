@@ -50,11 +50,11 @@ if token:
     fyers = fyersModel.FyersModel(client_id=APP_ID, token=token, is_async=False)
     print("✅ LOGIN SUCCESSFUL! Bot is live on GitHub.")
     requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
-                  json={"chat_id": TELEGRAM_CHAT_ID, "text": "🚀 *Bot Online (GitHub):* Scanning 200+ Stocks...", "parse_mode": "Markdown"})
+                  json={"chat_id": TELEGRAM_CHAT_ID, "text": "🚀 *Bot Online:* Scanning with +2%/-2% Directional Filter...", "parse_mode": "Markdown"})
 else:
     sys.exit("🔴 Login Failed. Check URL/Credentials.")
 
-# --- SCANNING LOGIC ---
+# --- STOCKS LIST ---
 stocks_list = "360ONE,ABB,ABCAPITAL,ADANIENSOL,ADANIENT,ADANIGREEN,ADANIPORTS,ALKEM,AMBER,AMBUJACEM,ANGELONE,APLAPOLLO,APOLLOHOSP,ASHOKLEY,ASIANPAINT,ASTRAL,AUBANK,AUROPHARMA,AXISBANK,BAJAJ_AUTO,BAJAJFINSV,BAJAJHLDNG,BAJFINANCE,BANDHANBNK,BANKBARODA,BANKINDIA,BDL,BEL,BHARATFORG,BHARTIARTL,BHEL,BIOCON,BLUESTARCO,BOSCHLTD,BPCL,BRITANNIA,BSE,CAMS,CANBK,CDSL,CGPOWER,CHOLAFIN,CIPLA,COALINDIA,COFORGE,COLPAL,CONCOR,CROMPTON,CUMMINSIND,DABUR,DALBHARAT,DELHIVERY,DIVISLAB,DIXON,DLF,DMART,DRREDDY,EICHERMOT,ETERNAL,EXIDEIND,FEDERALBNK,FORTIS,GAIL,GLENMARK,GMRAIRPORT,GODREJCP,GODREJPROP,GRASIM,HAL,HAVELLS,HCLTECH,HDFCAMC,HDFCBANK,HDFCLIFE,HEROMOTOCO,HINDALCO,HINDPETRO,HINDUNILVR,HINDZINC,HUDCO,ICICIBANK,ICICIGI,ICICIPRULI,IDEA,IDFCFIRSTB,IEX,IIFL,INDHOTEL,INDIANB,INDIGO,INDUSINDBK,INDUSTOWER,INFY,INOXWIND,IOC,IRCTC,IREDA,IRFC,ITC,JINDALSTEL,JIOFIN,JSWENERGY,JSWSTEEL,JUBLFOOD,KALYANKJIL,KAYNES,KEI,KFINTECH,KOTAKBANK,KPITTECH,LAURUSLABS,LICHSGFIN,LICI,LODHA,LT,LTF,LTIM,LUPIN,M_M,MANAPPURAM,MANKIND,MARICO,MARUTI,MAXHEALTH,MAZDOCK,MCX,MFSL,MOTHERSON,MPHASIS,MUTHOOTFIN,NATIONALUM,NAUKRI,NBCC,NESTLEIND,NHPC,NMDC,NTPC,NUVAMA,NYKAA,OBEROIRLTY,OFSS,OIL,ONGC,PAGEIND,PATANJALI,PAYTM,PERSISTENT,PETRONET,PFC,PGEL,PHOENIXLTD,PIDILITIND,PIIND,PNB,PNBHOUSING,POLICYBZR,POLYCAB,POWERGRID,POWERINDIA,PPLPHARMA,PREMIERENE,PRESTIGE,RBLBANK,RECLTD,RELIANCE,RVNL,SAIL,SAMMAANCAP,SBICARD,SBILIFE,SBIN,SHREECEM,SHRIRAMFIN,SIEMENS,SOLARINDS,SONACOMS,SRF,SUNPHARMA,SUPREMEIND,SUZLON,SWIGGY,SYNGENE,TATACONSUM,TATAELXSI,TATAPOWER,TATASTEEL,TATATECH,TCS,TECHM,TIINDIA,TITAN,TMPV,TORNTPHARM,TORNTPOWER,TRENT,TVSMOTOR,ULTRACEMCO,UNIONBANK,UNITDSPR,UNOMINDA,UPL,VBL,VEDL,VOLTAS,WAAREEENER,WIPRO,YESBANK,ZYDUSLIFE"
 stocks = [s.strip() for s in stocks_list.split(",")]
 
@@ -74,34 +74,44 @@ def scan():
                 
                 day_open = dfd.iloc[-1]['open']
                 curr_price = df5.iloc[-2]['close']
-                move_pct = abs((curr_price - day_open) / day_open) * 100
                 
-                if move_pct >= 2.0:
-                    # Pivot and Signal Logic (Same as before)
-                    prev = dfd.iloc[-2]
-                    p = (prev['high'] + prev['low'] + prev['close']) / 3
-                    levels = {"P":p, "R1":(2*p)-prev['low'], "S1":(2*p)-prev['high']}
-                    
-                    c_open, c_high, c_low, c_close = df5.iloc[-2]['open'], df5.iloc[-2]['high'], df5.iloc[-2]['low'], df5.iloc[-2]['close']
-                    body = abs(c_close - c_open)
-                    rng = c_high - c_low
-                    
-                    if rng > 0 and (body/rng) >= 0.6:
+                # change_pct: Positive (+) means up from open, Negative (-) means down from open
+                change_pct = ((curr_price - day_open) / day_open) * 100
+                
+                # Pivot Calc
+                prev = dfd.iloc[-2]
+                p = (prev['high'] + prev['low'] + prev['close']) / 3
+                levels = {"P":p, "R1":(2*p)-prev['low'], "S1":(2*p)-prev['high']}
+                
+                c_open, c_high, c_low, c_close = df5.iloc[-2]['open'], df5.iloc[-2]['high'], df5.iloc[-2]['low'], df5.iloc[-2]['close']
+                body = abs(c_close - c_open)
+                rng = c_high - c_low
+                
+                if rng > 0 and (body/rng) >= 0.6:
+                    # ✅ BUY: If Stock is Up > 2% AND Candle is Bullish AND level cross
+                    if change_pct >= 2.0 and c_close > c_open:
                         for name, val in levels.items():
-                            if c_close > c_open and c_low <= val and c_close > val:
+                            if c_low <= val and c_close > val:
+                                msg = f"🟢 *BULLISH BUY*: {s}\nPrice: {c_close}\nLevel: {name}\nChange: +{change_pct:.2f}%"
                                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
-                                              json={"chat_id": TELEGRAM_CHAT_ID, "text": f"🟢 *BUY*: {s} @ {c_close}\nLevel: {name}\nMove: {move_pct:.2f}%", "parse_mode": "Markdown"})
-                            elif c_close < c_open and c_high >= val and c_close < val:
+                                              json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
+                                break
+                    
+                    # ✅ SELL: If Stock is Down < -2% AND Candle is Bearish AND level cross
+                    elif change_pct <= -2.0 and c_close < c_open:
+                        for name, val in levels.items():
+                            if c_high >= val and c_close < val:
+                                msg = f"🔴 *BEARISH SELL*: {s}\nPrice: {c_close}\nLevel: {name}\nChange: {change_pct:.2f}%"
                                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
-                                              json={"chat_id": TELEGRAM_CHAT_ID, "text": f"🔴 *SELL*: {s} @ {c_close}\nLevel: {name}\nMove: {move_pct:.2f}%", "parse_mode": "Markdown"})
+                                              json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
+                                break
             time.sleep(0.04)
         except: continue
 
-# --- RUN UNTIL MARKET CLOSE (3:31 PM) ---
+# --- MAIN LOOP ---
 while True:
     now = datetime.datetime.now()
     if now.hour == 15 and now.minute >= 31:
-        print("🕒 Market Closed. Stopping Bot.")
         break
         
     if now.minute % 5 == 0 and now.second == 5:
