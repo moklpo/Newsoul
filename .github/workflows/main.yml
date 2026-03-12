@@ -1,0 +1,27 @@
+name: Fyers Bot Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      auth_url:
+        description: 'Fyers Login ke baad wala Google URL yahan dalein'
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: |
+          pip install fyers-apiv3 pandas requests
+
+      - name: Run Trading Bot
+        run: python b.py --url "${{ github.event.inputs.auth_url }}"
