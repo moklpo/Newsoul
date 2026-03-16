@@ -78,24 +78,24 @@ def scan():
                 # change_pct: Positive (+) means up from open, Negative (-) means down from open
                 change_pct = ((curr_price - day_open) / day_open) * 100
                 
-              # --- Pivot Calc (Standard Floor Pivots) ---
-prev = dfd.iloc[-2]
-ph, pl, pc = prev['high'], prev['low'], prev['close']
-p = (ph + pl + pc) / 3
+                # --- Pivot Calc (Standard Floor Pivots) ---
+                prev = dfd.iloc[-2]
+                ph, pl, pc = prev['high'], prev['low'], prev['close']
+                p = (ph + pl + pc) / 3
 
-# Sabhi R1-R5 aur S1-S5 levels add kar diye hain
-levels = {
-    "P": p,
-    "R1": (2*p)-pl, "R2": p+(ph-pl), "R3": ph+2*(p-pl), "R4": ph+3*(p-pl), "R5": ph+4*(p-pl),
-    "S1": (2*p)-ph, "S2": p-(ph-pl), "S3": pl-2*(ph-p), "S4": pl-3*(ph-p), "S5": pl-4*(ph-p)
-}
+                # Sabhi R1-R5 aur S1-S5 levels
+                levels = {
+                    "P": p,
+                    "R1": (2*p)-pl, "R2": p+(ph-pl), "R3": ph+2*(p-pl), "R4": ph+3*(p-pl), "R5": ph+4*(p-pl),
+                    "S1": (2*p)-ph, "S2": p-(ph-pl), "S3": pl-2*(ph-p), "S4": pl-3*(ph-p), "S5": pl-4*(ph-p)
+                }
                 
                 c_open, c_high, c_low, c_close = df5.iloc[-2]['open'], df5.iloc[-2]['high'], df5.iloc[-2]['low'], df5.iloc[-2]['close']
                 body = abs(c_close - c_open)
                 rng = c_high - c_low
                 
                 if rng > 0 and (body/rng) >= 0.6:
-                    # ✅ BUY: If Stock is Up > 2% AND Candle is Bullish AND level cross
+                    # ✅ BUY Logic
                     if change_pct >= 2.0 and c_close > c_open:
                         for name, val in levels.items():
                             if c_low <= val and c_close > val:
@@ -104,7 +104,7 @@ levels = {
                                               json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
                                 break
                     
-                    # ✅ SELL: If Stock is Down < -2% AND Candle is Bearish AND level cross
+                    # ✅ SELL Logic
                     elif change_pct <= -2.0 and c_close < c_open:
                         for name, val in levels.items():
                             if c_high >= val and c_close < val:
@@ -113,7 +113,8 @@ levels = {
                                               json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
                                 break
             time.sleep(0.04)
-        except: continue
+        except: 
+            continue
 
 # --- MAIN LOOP ---
 while True:
@@ -125,4 +126,3 @@ while True:
         scan()
         time.sleep(10)
     time.sleep(1)
-
