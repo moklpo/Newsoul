@@ -50,7 +50,7 @@ if token:
     fyers = fyersModel.FyersModel(client_id=APP_ID, token=token, is_async=False)
     print("✅ LOGIN SUCCESSFUL! Bot is live on GitHub.")
     requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
-                  json={"chat_id": TELEGRAM_CHAT_ID, "text": "🚀 *Bot Online:* Scanning with +2%/-2% Directional Filter...", "parse_mode": "Markdown"})
+                  json={"chat_id": TELEGRAM_CHAT_ID, "text": "🚀 *Bot Online:* Scanning with +1.5%/-1.5% Directional Filter...", "parse_mode": "Markdown"})
 else:
     sys.exit("🔴 Login Failed. Check URL/Credentials.")
 
@@ -75,7 +75,7 @@ def scan():
                 day_open = dfd.iloc[-1]['open']
                 curr_price = df5.iloc[-2]['close']
                 
-                # change_pct: Positive (+) means up from open, Negative (-) means down from open
+                # change_pct calculation
                 change_pct = ((curr_price - day_open) / day_open) * 100
                 
                 # --- Pivot Calc (Standard Floor Pivots) ---
@@ -95,8 +95,8 @@ def scan():
                 rng = c_high - c_low
                 
                 if rng > 0 and (body/rng) >= 0.6:
-                    # ✅ BUY Logic
-                    if change_pct >= 2.0 and c_close > c_open:
+                    # ✅ BUY Logic (Changed to 1.5)
+                    if change_pct >= 1.5 and c_close > c_open:
                         for name, val in levels.items():
                             if c_low <= val and c_close > val:
                                 msg = f"🟢 *BULLISH BUY*: {s}\nPrice: {c_close}\nLevel: {name}\nChange: +{change_pct:.2f}%"
@@ -104,8 +104,8 @@ def scan():
                                               json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
                                 break
                     
-                    # ✅ SELL Logic
-                    elif change_pct <= -2.0 and c_close < c_open:
+                    # ✅ SELL Logic (Changed to -1.5)
+                    elif change_pct <= -1.5 and c_close < c_open:
                         for name, val in levels.items():
                             if c_high >= val and c_close < val:
                                 msg = f"🔴 *BEARISH SELL*: {s}\nPrice: {c_close}\nLevel: {name}\nChange: {change_pct:.2f}%"
