@@ -50,7 +50,7 @@ if token:
     fyers = fyersModel.FyersModel(client_id=APP_ID, token=token, is_async=False)
     print("✅ LOGIN SUCCESSFUL! Bot is live on GitHub.")
     requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
-                  json={"chat_id": TELEGRAM_CHAT_ID, "text": "🚀 *Bot Online:* Scanning with +1.5%/-1.5% Directional Filter...", "parse_mode": "Markdown"})
+                  json={"chat_id": TELEGRAM_CHAT_ID, "text": "🚀 *Bot Online (15 Min):* Scanning with +1.5%/-1.5% Logic...", "parse_mode": "Markdown"})
 else:
     sys.exit("🔴 Login Failed. Check URL/Credentials.")
 
@@ -65,50 +65,49 @@ def scan():
     for s in stocks:
         try:
             symbol = f"NSE:{s}-EQ"
-            h5 = fyers.history({"symbol":symbol,"resolution":"5","date_format":"1","range_from":start_date,"range_to":today,"cont_flag":"1"})
+            # Resolution changed from "5" to "15"
+            h15 = fyers.history({"symbol":symbol,"resolution":"15","date_format":"1","range_from":start_date,"range_to":today,"cont_flag":"1"})
             hd = fyers.history({"symbol":symbol,"resolution":"D","date_format":"1","range_from":start_date,"range_to":today,"cont_flag":"1"})
 
-            if h5['s'] == 'ok' and hd['s'] == 'ok':
-                df5 = pd.DataFrame(h5['candles'], columns=['time','open','high','low','close','volume'])
+            if h15['s'] == 'ok' and hd['s'] == 'ok':
+                df15 = pd.DataFrame(h15['candles'], columns=['time','open','high','low','close','volume'])
                 dfd = pd.DataFrame(hd['candles'], columns=['time','open','high','low','close','volume'])
                 
                 day_open = dfd.iloc[-1]['open']
-                curr_price = df5.iloc[-2]['close']
+                curr_price = df15.iloc[-2]['close'] # Previous closed candle
                 
-                # change_pct calculation
                 change_pct = ((curr_price - day_open) / day_open) * 100
                 
-                # --- Pivot Calc (Standard Floor Pivots) ---
+                # --- Pivot Calc ---
                 prev = dfd.iloc[-2]
                 ph, pl, pc = prev['high'], prev['low'], prev['close']
                 p = (ph + pl + pc) / 3
 
-                # Sabhi R1-R5 aur S1-S5 levels
                 levels = {
                     "P": p,
                     "R1": (2*p)-pl, "R2": p+(ph-pl), "R3": ph+2*(p-pl), "R4": ph+3*(p-pl), "R5": ph+4*(p-pl),
                     "S1": (2*p)-ph, "S2": p-(ph-pl), "S3": pl-2*(ph-p), "S4": pl-3*(ph-p), "S5": pl-4*(ph-p)
                 }
                 
-                c_open, c_high, c_low, c_close = df5.iloc[-2]['open'], df5.iloc[-2]['high'], df5.iloc[-2]['low'], df5.iloc[-2]['close']
+                c_open, c_high, c_low, c_close = df15.iloc[-2]['open'], df15.iloc[-2]['high'], df15.iloc[-2]['low'], df15.iloc[-2]['close']
                 body = abs(c_close - c_open)
                 rng = c_high - c_low
                 
                 if rng > 0 and (body/rng) >= 0.6:
-                    # ✅ BUY Logic (Changed to 1.5)
+                    # BUY Logic
                     if change_pct >= 1.5 and c_close > c_open:
                         for name, val in levels.items():
                             if c_low <= val and c_close > val:
-                                msg = f"🟢 *BULLISH BUY*: {s}\nPrice: {c_close}\nLevel: {name}\nChange: +{change_pct:.2f}%"
+                                msg = f"🟢 *BULLISH BUY (15M)*: {s}\nPrice: {c_close}\nLevel: {name}\nChange: +{change_pct:.2f}%"
                                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
                                               json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
                                 break
                     
-                    # ✅ SELL Logic (Changed to -1.5)
+                    # SELL Logic
                     elif change_pct <= -1.5 and c_close < c_open:
                         for name, val in levels.items():
                             if c_high >= val and c_close < val:
-                                msg = f"🔴 *BEARISH SELL*: {s}\nPrice: {c_close}\nLevel: {name}\nChange: {change_pct:.2f}%"
+                                msg = f"🔴 *BEARISH SELL (15M)*: {s}\nPrice: {c_close}\nLevel: {name}\nChange: {change_pct:.2f}%"
                                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
                                               json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
                                 break
@@ -122,7 +121,8 @@ while True:
     if now.hour == 15 and now.minute >= 31:
         break
         
-    if now.minute % 5 == 0 and now.second == 5:
+    # Changed loop trigger to check every 15 minutes
+    if now.minute % 15 == 0 and now.second == 5:
         scan()
         time.sleep(10)
     time.sleep(1)
