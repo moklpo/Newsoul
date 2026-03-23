@@ -37,7 +37,7 @@ def get_access_token():
 token = get_access_token()
 if token:
     fyers = fyersModel.FyersModel(client_id=APP_ID, token=token, is_async=False)
-    send_telegram("🚀 *Bot Live (Turbo Mode):* Scanning with Live Quotes...")
+    send_telegram("🚀 *Bot Live:* Scanning Started at 9:25 AM...")
 else:
     sys.exit("🔴 Login Failed.")
 
@@ -46,16 +46,15 @@ stocks = [f"NSE:{s.strip()}-EQ" for s in stocks_raw.split(",")]
 
 def scan():
     today = datetime.date.today().strftime('%Y-%m-%d')
-    
-    # 1. Nifty Move (using Quote for absolute Accuracy)
     n_q = fyers.quotes({"symbols": "NSE:NIFTY50-INDEX"})
     if n_q['s'] != 'ok': return
     nifty_curr = n_q['d'][0]['v']['lp']
     nifty_open = n_q['d'][0]['v']['open_price']
     nifty_move = ((nifty_curr - nifty_open) / nifty_open) * 100
 
-    # 2. Process Stocks in Batches (Fast Quotes)
-    for i in range(0, len(stocks), 50): # 50 stocks per batch
+    near_miss_count = 0 # Debug counter
+
+    for i in range(0, len(stocks), 50):
         batch = ",".join(stocks[i:i+50])
         q_resp = fyers.quotes({"symbols": batch})
         
@@ -67,16 +66,17 @@ def scan():
                 m_open = v['open_price']
                 change_pct = ((curr_p - m_open) / m_open) * 100
                 
-                # Candle Strength check (Still need history for OHLC of current candle)
-                # But only check history IF change_pct is interesting (>1%)
-                if abs(change_pct) >= 1.1:
+                # Agar stock 1% ke uupar hai toh check karega
+                if abs(change_pct) >= 1.0:
+                    near_miss_count += 1
                     h = fyers.history({"symbol":sym, "resolution":"5", "date_format":"1", "range_from":today, "range_to":today})
                     if h['s'] == 'ok' and len(h['candles']) > 0:
                         last_c = h['candles'][-1]
                         c_o, c_h, c_l, c_c = last_c[1], last_c[2], last_c[3], last_c[4]
                         
                         body, rng = abs(c_c - c_o), c_h - c_l
-                        is_strong = (body/rng) >= 0.6 if rng > 0 else False
+                        # Condition Relaxed to 50% Body instead of 60%
+                        is_strong = (body/rng) >= 0.5 if rng > 0 else False
                         
                         is_res_buy = (change_pct >= (nifty_move * 0.4)) if nifty_move < -0.15 else True
                         is_weak_sell = (change_pct <= (nifty_move * 0.4)) if nifty_move > 0.15 else True
@@ -86,12 +86,14 @@ def scan():
                         elif change_pct <= -1.2 and is_strong and is_weak_sell:
                             send_telegram(f"🔴 *SELL*: {sym}\nPrice: {curr_p}\nMove: {change_pct:.2f}%\nNifty: {nifty_move:.2f}%")
         time.sleep(0.5)
+    
+    # Har scan ke baad console pe update dega
+    print(f"Scan Finished. Nifty: {nifty_move:.2f}%. Interesting Stocks found: {near_miss_count}")
 
-# --- LOOP ---
 while True:
     now = datetime.datetime.now()
     if (now.hour == 9 and now.minute >= 25) or (now.hour == 10):
         scan()
-        time.sleep(30) # High frequency scan (30 sec)
+        time.sleep(60) # Har minute scan karega
     elif now.hour >= 11: break
     time.sleep(1)
