@@ -21,7 +21,7 @@ TELEGRAM_CHAT_ID = "1250330319"
 
 CHANGE_THRESHOLD = 1.2    # Min 1.2% move from 9:15 open
 BODY_RATIO_MIN = 0.6     # 60% Candle Body/Range
-LOOKBACK = 15            # 15 Candles for Fresh High/Low
+LOOKBACK = 5           # 5 Candles for Fresh High/Low
 NIFTY_LIMIT = 0.15       # Nifty RS Threshold
 SL_PCT = 0.5             # 0.5% Fixed SL
 TP_PCT = 1.0             # 1.0% Target
