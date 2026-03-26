@@ -21,7 +21,8 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install fyers-apiv3 pandas requests
+          python -m pip install --upgrade pip
+          pip install fyers-apiv3 pandas requests pandas_ta
 
       - name: Run Trading Bot
         run: python b.py --url "${{ github.event.inputs.auth_url }}"
