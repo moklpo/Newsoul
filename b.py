@@ -7,42 +7,27 @@ import re
 import argparse
 import sys
 
-# --- INPUT HANDLING ---
+# --- INPUT HANDLING FOR GITHUB ---
 parser = argparse.ArgumentParser()
-parser.add_argument("--url", help="Fyers Redirect URL")
+parser.add_argument("--url", help="Fyers Redirect URL from GitHub Input")
 args = parser.parse_args()
 
-# --- STRATEGY CONFIG ---
+# --- STRATEGY CONFIGURATION (Pinescript logic) ---
 APP_ID = "ESUCFMYU9Q-100"
 SECRET_ID = "1ESVP5WA71"
 REDIRECT_URL = "https://www.google.com/"
 TELEGRAM_TOKEN = "8474252007:AAF-BiJGtj8URcEsd9RMUJkDMfJgKoEN_gw"
 TELEGRAM_CHAT_ID = "1250330319"
 
-CHANGE_THRESHOLD = 1.2
-BODY_RATIO_MIN = 0.6
-LOOKBACK = 15
-NIFTY_LIMIT = 0.15
-SL_PCT = 0.5
-TP_PCT = 1.0
-EMA_LEN = 5
-PULLBACK_BUFFER = 0.20
-ATR_MULTIPLIER = 2.0
-MAX_SIGNALS = 3
+CHANGE_THRESHOLD = 1.2    # Min 1.2% move from 9:15 open
+BODY_RATIO_MIN = 0.6     # 60% Candle Body/Range
+LOOKBACK = 15           # 15 Candles for Fresh High/Low
+NIFTY_LIMIT = 0.15       # Nifty RS Threshold
+SL_PCT = 0.5             # 0.5% Fixed SL
+TP_PCT = 1.0             # 1.0% Target
 
+# Tracker to prevent duplicate alerts
 notified_stocks = {}
-
-# --- MANUAL INDICATORS (No pandas_ta needed) ---
-def get_ema(series, length):
-    return series.ewm(span=length, adjust=False).mean()
-
-def get_atr(df, length=14):
-    high_low = df['high'] - df['low']
-    high_close = (df['high'] - df['close'].shift()).abs()
-    low_close = (df['low'] - df['close'].shift()).abs()
-    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_range = ranges.max(axis=1)
-    return true_range.rolling(window=length).mean()
 
 def get_access_token():
     if not args.url: return None
@@ -53,102 +38,145 @@ def get_access_token():
             session = fyersModel.SessionModel(client_id=APP_ID, secret_key=SECRET_ID, redirect_uri=REDIRECT_URL, response_type="code", grant_type="authorization_code")
             session.set_token(auth_code)
             return session.generate_token().get("access_token")
-    except Exception as e: print(f"❌ Login Error: {e}")
+    except Exception as e:
+        print(f"❌ Login Error: {e}")
     return None
 
 def send_telegram(msg):
-    try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
+    try:
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
     except: pass
 
 def get_perfect_strike(symbol, price, side):
+    """
+    Professional Strike Selection:
+    Automatically detects Exchange Step Sizes (Gap) for Stocks & Indices.
+    Selects ATM/Slightly OTM for low theta and affordability.
+    """
+    # 1. Detect Step Size based on Price & Symbol
     if "NIFTY" in symbol and "BANK" not in symbol: step = 50
     elif "BANKNIFTY" in symbol: step = 100
+    elif price > 10000: step = 100
+    elif price > 5000: step = 50
+    elif price > 2000: step = 20
     elif price > 1000: step = 10
     elif price > 500: step = 5
-    else: step = 2.5
-    atm = round(price / step) * step
-    return f"{atm + step if side == 'BUY' else atm - step} {'CE' if side == 'BUY' else 'PE'}"
+    elif price > 200: step = 2.5
+    else: step = 1
+
+    # 2. Calculate ATM
+    atm_strike = round(price / step) * step
+
+    if side == "BUY":
+        # Call side: ATM + 1 step OTM (Sasta & Low Theta)
+        suggested = atm_strike + step
+        return f"{suggested} CE"
+    else:
+        # Put side: ATM - 1 step OTM
+        suggested = atm_strike - step
+        return f"{suggested} PE"
 
 # --- LOGIN ---
 token = get_access_token()
 if token:
     fyers = fyersModel.FyersModel(client_id=APP_ID, token=token, is_async=False)
-    send_telegram("🚀 *Bot Online:* 5 EMA Logic Active (No-Library Mode)")
+    print("✅ SYSTEM LIVE: Nifty Resilience & Perfect Strike Suggester Active")
+    send_telegram("🚀 *Bot Online:* Scanning with RS Filter & Perfect Strike Suggester...")
 else:
     sys.exit("🔴 Login Failed.")
 
+# --- STOCKS LIST ---
 stocks_list = "360ONE,ABB,ABCAPITAL,ADANIENSOL,ADANIENT,ADANIGREEN,ADANIPORTS,ALKEM,AMBER,AMBUJACEM,ANGELONE,APLAPOLLO,APOLLOHOSP,ASHOKLEY,ASIANPAINT,ASTRAL,AUBANK,AUROPHARMA,AXISBANK,BAJAJ_AUTO,BAJAJFINSV,BAJAJHLDNG,BAJFINANCE,BANDHANBNK,BANKBARODA,BANKINDIA,BDL,BEL,BHARATFORG,BHARTIARTL,BHEL,BIOCON,BLUESTARCO,BOSCHLTD,BPCL,BRITANNIA,BSE,CAMS,CANBK,CDSL,CGPOWER,CHOLAFIN,CIPLA,COALINDIA,COFORGE,COLPAL,CONCOR,CROMPTON,CUMMINSIND,DABUR,DALBHARAT,DELHIVERY,DIVISLAB,DIXON,DLF,DMART,DRREDDY,EICHERMOT,ETERNAL,EXIDEIND,FEDERALBNK,FORTIS,GAIL,GLENMARK,GMRAIRPORT,GODREJCP,GODREJPROP,GRASIM,HAL,HAVELLS,HCLTECH,HDFCAMC,HDFCBANK,HDFCLIFE,HEROMOTOCO,HINDALCO,HINDPETRO,HINDUNILVR,HINDZINC,HUDCO,ICICIBANK,ICICIGI,ICICIPRULI,IDEA,IDFCFIRSTB,IEX,IIFL,INDHOTEL,INDIANB,INDIGO,INDUSINDBK,INDUSTOWER,INFY,INOXWIND,IOC,IRCTC,IREDA,IRFC,ITC,JINDALSTEL,JIOFIN,JSWENERGY,JSWSTEEL,JUBLFOOD,KALYANKJIL,KAYNES,KEI,KFINTECH,KOTAKBANK,KPITTECH,LAURUSLABS,LICHSGFIN,LICI,LODHA,LT,LTF,LTIM,LUPIN,M_M,MANAPPURAM,MANKIND,MARICO,MARUTI,MAXHEALTH,MAZDOCK,MCX,MFSL,MOTHERSON,MPHASIS,MUTHOOTFIN,NATIONALUM,NAUKRI,NBCC,NESTLEIND,NHPC,NMDC,NTPC,NUVAMA,NYKAA,OBEROIRLTY,OFSS,OIL,ONGC,PAGEIND,PATANJALI,PAYTM,PERSISTENT,PETRONET,PFC,PGEL,PHOENIXLTD,PIDILITIND,PIIND,PNB,PNBHOUSING,POLICYBZR,POLYCAB,POWERGRID,POWERINDIA,PPLPHARMA,PREMIERENE,PRESTIGE,RBLBANK,RECLTD,RELIANCE,RVNL,SAIL,SAMMAANCAP,SBICARD,SBILIFE,SBIN,SHREECEM,SHRIRAMFIN,SIEMENS,SOLARINDS,SONACOMS,SRF,SUNPHARMA,SUPREMEIND,SUZLON,SWIGGY,SYNGENE,TATACONSUM,TATAELXSI,TATAPOWER,TATASTEEL,TATATECH,TCS,TECHM,TIINDIA,TITAN,TMPV,TORNTPHARM,TORNTPOWER,TRENT,TVSMOTOR,ULTRACEMCO,UNIONBANK,UNITDSPR,UNOMINDA,UPL,VBL,VEDL,VOLTAS,WAAREEENER,WIPRO,YESBANK,ZYDUSLIFE"
 stocks = [s.strip() for s in stocks_list.split(",")]
 
 def scan():
     today = datetime.date.today()
     start_date = (today - datetime.timedelta(days=7)).strftime('%Y-%m-%d')
+    today_str = today.strftime('%Y-%m-%d')
     
-    n_res = fyers.history({"symbol":"NSE:NIFTY50-INDEX","resolution":"5","date_format":"1","range_from":start_date,"range_to":today.strftime('%Y-%m-%d')})
-    if n_res['s'] != 'ok': return
-    df_nifty = pd.DataFrame(n_res['candles'], columns=['time','open','high','low','close','volume'])
-    df_nifty_today = df_nifty[pd.to_datetime(df_nifty['time'], unit='s').dt.date == today]
-    if len(df_nifty_today) < 3: return
+    # 1. Fetch Nifty 50 Index Data
+    nifty_h5 = fyers.history({"symbol":"NSE:NIFTY50-INDEX","resolution":"5","date_format":"1","range_from":start_date,"range_to":today_str})
+    if nifty_h5['s'] != 'ok': return
     
+    df_nifty = pd.DataFrame(nifty_h5['candles'], columns=['time','open','high','low','close','volume'])
+    df_nifty['time'] = pd.to_datetime(df_nifty['time'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
+    df_nifty_today = df_nifty[df_nifty['time'].dt.date == today]
+    
+    if len(df_nifty_today) < 3: return # 🛡️ Safety: No signals before 9:30 AM (3 candles)
+
     nifty_m_open = df_nifty_today.iloc[0]['open']
-    nifty_day_move = ((df_nifty_today.iloc[-1]['close'] - nifty_m_open) / nifty_m_open) * 100
+    nifty_close = df_nifty_today.iloc[-1]['close']
+    nifty_day_move = ((nifty_close - nifty_m_open) / nifty_m_open) * 100
 
     for s in stocks:
         try:
             symbol = f"NSE:{s}-EQ"
-            res = fyers.history({"symbol":symbol,"resolution":"5","date_format":"1","range_from":start_date,"range_to":today.strftime('%Y-%m-%d')})
-            if res['s'] != 'ok': continue
+            h5 = fyers.history({"symbol":symbol,"resolution":"5","date_format":"1","range_from":start_date,"range_to":today_str})
+            if h5['s'] != 'ok': continue
             
-            df = pd.DataFrame(res['candles'], columns=['time','open','high','low','close','volume'])
-            df['ema5'] = get_ema(df['close'], EMA_LEN)
-            df['atr'] = get_atr(df, 14)
+            df = pd.DataFrame(h5['candles'], columns=['time','open','high','low','close','volume'])
+            df['time'] = pd.to_datetime(df['time'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
+            df_today = df[df['time'].dt.date == today]
             
-            curr = df.iloc[-2]
-            df_today = df[pd.to_datetime(df['time'], unit='s').dt.date == today]
-            if len(df_today) < 3: continue
+            if len(df_today) < 3: continue 
 
             m_open = df_today.iloc[0]['open']
-            stock_move = ((curr['close'] - m_open) / m_open) * 100
+            curr = df.iloc[-2]
+            c_close, c_open, c_high, c_low = curr['close'], curr['open'], curr['high'], curr['low']
             
-            # Logic
-            is_fresh_high = curr['close'] > df.iloc[-(LOOKBACK+2):-2]['high'].max()
-            is_fresh_low = curr['close'] < df.iloc[-(LOOKBACK+2):-2]['low'].min()
+            stock_day_move = ((c_close - m_open) / m_open) * 100
             
-            c_rng = curr['high'] - curr['low']
-            is_strong = c_rng > 0 and (abs(curr['close'] - curr['open']) / c_rng) >= BODY_RATIO_MIN
-            is_not_spike = c_rng <= (curr['atr'] * ATR_MULTIPLIER)
+            # 2. Fresh High/Low (15 candle lookback across yesterday & today)
+            is_fresh_high = c_close > df.iloc[-(LOOKBACK+2):-2]['high'].max()
+            is_fresh_low = c_close < df.iloc[-(LOOKBACK+2):-2]['low'].min()
             
-            dist_ema_buy = (curr['low'] - curr['ema5']) / curr['ema5'] * 100
-            dist_ema_sell = (curr['ema5'] - curr['high']) / curr['ema5'] * 100
-            is_buy_pb = curr['low'] <= curr['ema5'] or (dist_ema_buy <= PULLBACK_BUFFER and curr['low'] > curr['ema5'])
-            is_sell_pb = curr['high'] >= curr['ema5'] or (dist_ema_sell <= PULLBACK_BUFFER and curr['high'] < curr['ema5'])
+            # 3. Candle Strength (60% Body Ratio)
+            c_rng = c_high - c_low
+            is_strong = c_rng > 0 and (abs(c_close - c_open) / c_rng) >= BODY_RATIO_MIN
+            
+            # 4. Nifty Resilience Logic
+            resilient_buy = True
+            if nifty_day_move < -NIFTY_LIMIT and stock_day_move < (nifty_day_move * 0.4): resilient_buy = False
+            
+            weak_sell = True
+            if nifty_day_move > NIFTY_LIMIT and stock_day_move > (nifty_day_move * 0.4): weak_sell = False
 
-            resilient_buy = not (nifty_day_move < -NIFTY_LIMIT and stock_move < (nifty_day_move * 0.4))
-            weak_sell = not (nifty_day_move > NIFTY_LIMIT and stock_move > (nifty_day_move * 0.4))
-
-            if s not in notified_stocks: notified_stocks[s] = {'b_count': 0, 's_count': 0, 'last_bar': 0}
-
+            # --- SIGNAL GENERATION ---
             signal = None
-            if stock_move >= CHANGE_THRESHOLD and is_fresh_high and is_strong and resilient_buy and is_buy_pb and curr['close'] > curr['ema5'] and is_not_spike and notified_stocks[s]['b_count'] < MAX_SIGNALS:
+            if stock_day_move >= CHANGE_THRESHOLD and is_fresh_high and is_strong and resilient_buy and c_close > c_open:
                 signal = "BUY"
-            elif stock_move <= -CHANGE_THRESHOLD and is_fresh_low and is_strong and weak_sell and is_sell_pb and curr['close'] < curr['ema5'] and is_not_huge_spike and notified_stocks[s]['s_count'] < MAX_SIGNALS:
+            elif stock_day_move <= -CHANGE_THRESHOLD and is_fresh_low and is_strong and weak_sell and c_close < c_open:
                 signal = "SELL"
 
-            if signal and curr['time'] > notified_stocks[s]['last_bar'] + 300:
-                notified_stocks[s]['last_bar'] = curr['time']
-                if signal == "BUY": notified_stocks[s]['b_count'] += 1
-                else: notified_stocks[s]['s_count'] += 1
+            if signal and notified_stocks.get(s) != signal:
+                sl = round(c_close * (1 - SL_PCT/100 if signal == "BUY" else 1 + SL_PCT/100), 2)
+                tp = round(c_close * (1 + TP_PCT/100 if signal == "BUY" else 1 - TP_PCT/100), 2)
                 
-                strike = get_perfect_strike(s, curr['close'], signal)
-                msg = f"{'🚀' if signal=='BUY' else '📉'} *{signal}*: {s}\nPrice: {curr['close']}\nMove: {stock_move:.2f}%\nStrike: `{strike}`"
+                # Perfect Strike Selection
+                perfect_option = get_perfect_strike(s, c_close, signal)
+                
+                emoji = "🚀" if signal == "BUY" else "📉"
+                msg = (f"{emoji} *{signal} ALERT*: {s}\n"
+                       f"━━━━━━━━━━━━━━━━━━\n"
+                       f"💰 *Price:* {c_close}\n"
+                       f"📊 *Day Move:* {stock_day_move:.2f}%\n"
+                       f"🎯 *Option:* `{perfect_option}`\n"
+                       f"🛡 *SL:* {sl} | 🎯 *TP:* {tp}\n"
+                       f"━━━━━━━━━━━━━━━━━━\n"
+                       f"⚡ *RS Strategy:* Nifty Resilience Active")
+                
                 send_telegram(msg)
-            time.sleep(0.02)
+                notified_stocks[s] = signal
+
+            time.sleep(0.04)
         except: continue
 
 # --- MAIN LOOP ---
 while True:
     now = datetime.datetime.now()
     if now.hour == 15 and now.minute >= 31: break
+    
+    # Run every 5 minutes at the 5th second (9:20, 9:25, 9:30 etc.)
     if now.minute % 5 == 0 and now.second == 5:
         scan()
         time.sleep(10)
