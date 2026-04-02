@@ -79,8 +79,8 @@ def get_perfect_strike(symbol, price, side):
 token = get_access_token()
 if token:
     fyers = fyersModel.FyersModel(client_id=APP_ID, token=token, is_async=False)
-    print("✅ SYSTEM LIVE: 5 EMA & ATR Filter Active (No TP)")
-    send_telegram("🚀 *Bot Online:* EMA Pullback & ATR Filter Active (No TP)...")
+    print("✅ SYSTEM LIVE: 5 EMA & ATR Filter Active (Top 20 Ranking)")
+    send_telegram("🚀 *Bot Online:* Scanning Top 20 Gainers & Losers...")
 else:
     sys.exit("🔴 Login Failed.")
 
@@ -92,6 +92,28 @@ def scan():
     start_date = (today - datetime.timedelta(days=7)).strftime('%Y-%m-%d')
     today_str = today.strftime('%Y-%m-%d')
     
+    # --- 1. DYNAMIC RANKING LOGIC ---
+    ranking_data = []
+    print("🔍 Fetching Ranking...")
+    for s in stocks:
+        try:
+            symbol = f"NSE:{s}-EQ"
+            h_rank = fyers.history({"symbol":symbol,"resolution":"5","date_format":"1","range_from":today_str,"range_to":today_str})
+            if h_rank['s'] == 'ok' and len(h_rank['candles']) > 0:
+                df_q = pd.DataFrame(h_rank['candles'], columns=['time','open','high','low','close','volume'])
+                m_open = df_q.iloc[0]['open']
+                curr_p = df_q.iloc[-1]['close']
+                d_chg = ((curr_p - m_open) / m_open) * 100
+                ranking_data.append({'symbol': s, 'change': d_chg})
+        except: continue
+
+    if not ranking_data: return
+    rank_df = pd.DataFrame(ranking_data)
+    top_20_gainers = rank_df.sort_values(by='change', ascending=False).head(20)['symbol'].tolist()
+    top_20_losers = rank_df.sort_values(by='change', ascending=True).head(20)['symbol'].tolist()
+    target_stocks = top_20_gainers + top_20_losers
+
+    # --- 2. NIFTY CONTEXT ---
     n_res = fyers.history({"symbol":"NSE:NIFTY50-INDEX","resolution":"5","date_format":"1","range_from":start_date,"range_to":today_str})
     if n_res['s'] != 'ok': return
     
@@ -103,7 +125,8 @@ def scan():
     n_m_open = df_n_today.iloc[0]['open']
     n_move = ((df_n_today.iloc[-1]['close'] - n_m_open) / n_m_open) * 100
 
-    for s in stocks:
+    # --- 3. STRATEGY SCAN (On Target Stocks) ---
+    for s in target_stocks:
         try:
             symbol = f"NSE:{s}-EQ"
             h5 = fyers.history({"symbol":symbol,"resolution":"5","date_format":"1","range_from":start_date,"range_to":today_str})
@@ -138,9 +161,9 @@ def scan():
             if s not in notified_stocks: notified_stocks[s] = {'b': 0, 's': 0, 'last': 0}
 
             signal = None
-            if s_move >= CHANGE_THRESHOLD and is_fresh_high and is_strong and r_buy and is_buy_pb and curr['close'] > curr['ema5'] and is_not_spike and notified_stocks[s]['b'] < MAX_SIGNALS:
+            if s in top_20_gainers and s_move >= CHANGE_THRESHOLD and is_fresh_high and is_strong and r_buy and is_buy_pb and curr['close'] > curr['ema5'] and is_not_spike and notified_stocks[s]['b'] < MAX_SIGNALS:
                 signal = "BUY"
-            elif s_move <= -CHANGE_THRESHOLD and is_fresh_low and is_strong and w_sell and is_sell_pb and curr['close'] < curr['ema5'] and is_not_spike and notified_stocks[s]['s'] < MAX_SIGNALS:
+            elif s in top_20_losers and s_move <= -CHANGE_THRESHOLD and is_fresh_low and is_strong and w_sell and is_sell_pb and curr['close'] < curr['ema5'] and is_not_spike and notified_stocks[s]['s'] < MAX_SIGNALS:
                 signal = "SELL"
 
             if signal and curr['time'] > notified_stocks[s]['last'] + 300:
