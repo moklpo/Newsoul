@@ -20,16 +20,20 @@ TELEGRAM_TOKEN = "8474252007:AAF-BiJGtj8URcEsd9RMUJkDMfJgKoEN_gw"
 TELEGRAM_CHAT_ID = "1250330319"
 
 CHANGE_THRESHOLD = 1.2    
-BODY_RATIO_MIN = 0.5      # Updated to 0.5
-LOOKBACK = 15           
-NIFTY_LIMIT = 0.15       
-SL_PCT = 0.5             
+BODY_RATIO_MIN = 0.5      
+LOOKBACK = 15            
+NIFTY_LIMIT = 0.15        
+SL_PCT = 0.5              
 
-# --- LOGIC PARAMETERS ---
+# --- LOGIC PARAMETERS (UPDATED AS PER REQUEST) ---
 EMA_LEN = 5
-PULLBACK_BUFFER = 0.25    # Updated to 0.25
-ATR_MULTIPLIER = 2.0    
-MAX_SIGNALS = 3         
+PULLBACK_BUFFER = 0.25    # Updated
+ATR_MULTIPLIER = 1.4      # Updated to 1.4
+MAX_SIGNALS = 3          
+VOL_SURGE_MULT = 1.2      # Updated to 1.2
+RSI_PERIOD = 14
+RSI_BULLISH = 60          
+RSI_BEARISH = 40          
 
 notified_stocks = {}
 
@@ -44,6 +48,13 @@ def get_atr(df, length=14):
     ranges = pd.concat([high_low, high_close, low_close], axis=1)
     true_range = ranges.max(axis=1)
     return true_range.rolling(window=length).mean()
+
+def get_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
 
 def get_access_token():
     if not args.url: return None
@@ -79,8 +90,8 @@ def get_perfect_strike(symbol, price, side):
 token = get_access_token()
 if token:
     fyers = fyersModel.FyersModel(client_id=APP_ID, token=token, is_async=False)
-    print("✅ SYSTEM LIVE: 5 EMA & ATR Filter Active (No TP)")
-    send_telegram("🚀 *Bot Online:* EMA Pullback & ATR Filter Active (No TP)...")
+    print(f"✅ SYSTEM LIVE: VolSurge({VOL_SURGE_MULT}) & ATR({ATR_MULTIPLIER}) Active")
+    send_telegram(f"🚀 *Bot Online:* VolSurge {VOL_SURGE_MULT}x & ATR {ATR_MULTIPLIER} Filter Active...")
 else:
     sys.exit("🔴 Login Failed.")
 
@@ -112,8 +123,12 @@ def scan():
             df = pd.DataFrame(h5['candles'], columns=['time','open','high','low','close','volume'])
             df['ema5'] = get_ema(df['close'], EMA_LEN)
             df['atr'] = get_atr(df, 14)
+            df['rsi'] = get_rsi(df['close'], RSI_PERIOD)
+            df['vol_avg'] = df['volume'].rolling(window=10).mean()
             
             curr = df.iloc[-2]
+            prev_vol_avg = df.iloc[-3]['vol_avg']
+            
             df_t = df[pd.to_datetime(df['time'], unit='s').dt.date == today]
             if len(df_t) < 3: continue 
 
@@ -135,12 +150,16 @@ def scan():
             r_buy = not (n_move < -NIFTY_LIMIT and s_move < (n_move * 0.4))
             w_sell = not (n_move > NIFTY_LIMIT and s_move > (n_move * 0.4))
 
+            is_vol_surge = curr['volume'] > (prev_vol_avg * VOL_SURGE_MULT)
+            is_rsi_bull = curr['rsi'] > RSI_BULLISH
+            is_rsi_bear = curr['rsi'] < RSI_BEARISH
+
             if s not in notified_stocks: notified_stocks[s] = {'b': 0, 's': 0, 'last': 0}
 
             signal = None
-            if s_move >= CHANGE_THRESHOLD and is_fresh_high and is_strong and r_buy and is_buy_pb and curr['close'] > curr['ema5'] and is_not_spike and notified_stocks[s]['b'] < MAX_SIGNALS:
+            if s_move >= CHANGE_THRESHOLD and is_fresh_high and is_strong and r_buy and is_buy_pb and curr['close'] > curr['ema5'] and is_not_spike and is_vol_surge and is_rsi_bull and notified_stocks[s]['b'] < MAX_SIGNALS:
                 signal = "BUY"
-            elif s_move <= -CHANGE_THRESHOLD and is_fresh_low and is_strong and w_sell and is_sell_pb and curr['close'] < curr['ema5'] and is_not_spike and notified_stocks[s]['s'] < MAX_SIGNALS:
+            elif s_move <= -CHANGE_THRESHOLD and is_fresh_low and is_strong and w_sell and is_sell_pb and curr['close'] < curr['ema5'] and is_not_spike and is_vol_surge and is_rsi_bear and notified_stocks[s]['s'] < MAX_SIGNALS:
                 signal = "SELL"
 
             if signal and curr['time'] > notified_stocks[s]['last'] + 300:
@@ -151,10 +170,11 @@ def scan():
                 sl = round(curr['close'] * (1 - SL_PCT/100 if signal == "BUY" else 1 + SL_PCT/100), 2)
                 perfect_option = get_perfect_strike(s, curr['close'], signal)
                 
-                msg = (f"{'🚀' if signal == 'BUY' else '📉'} *{signal} ALERT*: {s}\n"
+                msg = (f"{'🔥' if signal == 'BUY' else '📉'} *PRO {signal}*: {s}\n"
                        f"━━━━━━━━━━━━━━━━━━\n"
                        f"💰 Price: {curr['close']}\n"
                        f"📊 Day Move: {s_move:.2f}%\n"
+                       f"🚀 RSI: {curr['rsi']:.1f} | Vol: {int(curr['volume']/prev_vol_avg)}x\n"
                        f"🎯 Option: `{perfect_option}`\n"
                        f"🛡 SL: {sl}")
                 send_telegram(msg)
