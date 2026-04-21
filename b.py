@@ -33,6 +33,7 @@ def get_mfi(df, period):
     money_flow = typical_price * df['volume']
     pos_flow = money_flow.where(typical_price > typical_price.shift(1), 0).rolling(window=period).sum()
     neg_flow = money_flow.where(typical_price < typical_price.shift(1), 0).rolling(window=period).sum()
+    if neg_flow.iloc[-1] == 0: return pd.Series([100] * len(df))
     return 100 - (100 / (1 + (pos_flow / neg_flow)))
 
 def calculate_alphatrend(df):
@@ -49,7 +50,6 @@ def calculate_alphatrend(df):
             at[i] = downT.iloc[i] if downT.iloc[i] < at[i-1] else at[i-1]
     return pd.Series(at, index=df.index)
 
-# --- UTILS ---
 def send_telegram(msg):
     try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
     except: pass
@@ -63,7 +63,6 @@ def get_access_token():
         return session.generate_token().get("access_token")
     except: return None
 
-# --- TOP MOVERS (From Open) ---
 def get_top_movers(fyers, all_stocks):
     movers = []
     batch_size = 50
@@ -72,15 +71,14 @@ def get_top_movers(fyers, all_stocks):
         res = fyers.quotes({"symbols": ",".join([f"NSE:{s}-EQ" for s in batch])})
         if res['s'] == 'ok':
             for d in res['d']:
-                if 'lp' in d['v'] and 'open_price' in d['v']:
-                    if d['v']['open_price'] != 0:
-                        change = ((d['v']['lp'] - d['v']['open_price']) / d['v']['open_price']) * 100
-                        movers.append({'symbol': d['n'].split(":")[1].replace("-EQ", ""), 'change': change})
+                if 'lp' in d['v'] and 'open_price' in d['v'] and d['v']['open_price'] != 0:
+                    change = ((d['v']['lp'] - d['v']['open_price']) / d['v']['open_price']) * 100
+                    movers.append({'symbol': d['n'].split(":")[1].replace("-EQ", ""), 'change': change})
     df = pd.DataFrame(movers)
     if df.empty: return all_stocks[:40]
     return list(set(df.nlargest(20, 'change')['symbol'].tolist() + df.nsmallest(20, 'change')['symbol'].tolist()))
 
-# --- CORE SCANNER ---
+# --- CORE SCANNER (Flat to Sloping Logic) ---
 def scan(fyers, active_stocks):
     today = datetime.date.today()
     start_dt = (today - datetime.timedelta(days=5)).strftime('%Y-%m-%d')
@@ -92,37 +90,29 @@ def scan(fyers, active_stocks):
             
             df = pd.DataFrame(res['candles'], columns=['time','open','high','low','close','volume'])
             df['at'] = calculate_alphatrend(df)
-            df['at_delayed'] = df['at'].shift(2)
             
             df_today = df[pd.to_datetime(df['time'], unit='s').dt.date == today].copy()
             if df_today.empty: continue
             
             day_open = df_today.iloc[0]['open']
-            curr = df_today.iloc[-1]
-            prev = df_today.iloc[-2]
+            curr = df.iloc[-1]
+            prev = df.iloc[-2]
+            prev2 = df.iloc[-3] # Flat check ke liye
 
             signal_type = None
             
+            # --- FLAT TO SLOPING LOGIC ---
+            # BUY: Pichli line flat thi (prev == prev2) aur ab current line upar hai (curr > prev)
+            is_flat_to_up = (prev['at'] == prev2['at']) and (curr['at'] > prev['at'])
+            
+            # SELL: Pichli line flat thi (prev == prev2) aur ab current line niche hai (curr < prev)
+            is_flat_to_down = (prev['at'] == prev2['at']) and (curr['at'] < prev['at'])
+
             # 1.2% Filter Check
-            buy_zone = curr['close'] >= (day_open * CHANGE_FILTER)
-            sell_zone = curr['close'] <= (day_open * SELL_FILTER)
-
-            # Signal Logic
-            if buy_zone:
-                # Main Crossover
-                if prev['at'] <= prev['at_delayed'] and curr['at'] > curr['at_delayed']:
-                    signal_type = "🚀 ALPHA BUY"
-                # Re-entry (Touch & Go)
-                elif (abs(curr['at']-curr['at_delayed'])/curr['at'] < 0.0002) and curr['at'] > prev['at']:
-                    signal_type = "🔼 RE-ENTRY BUY"
-
-            elif sell_zone:
-                # Main Crossunder
-                if prev['at'] >= prev['at_delayed'] and curr['at'] < curr['at_delayed']:
-                    signal_type = "📉 ALPHA SELL"
-                # Re-entry (Touch & Go)
-                elif (abs(curr['at']-curr['at_delayed'])/curr['at'] < 0.0002) and curr['at'] < prev['at']:
-                    signal_type = "🔽 RE-ENTRY SELL"
+            if curr['close'] >= (day_open * CHANGE_FILTER) and is_flat_to_up:
+                signal_type = "📈 TREND START: BUY"
+            elif curr['close'] <= (day_open * SELL_FILTER) and is_flat_to_down:
+                signal_type = "📉 TREND START: SELL"
 
             if signal_type and (s not in notified_stocks or time.time() - notified_stocks[s] > 300):
                 notified_stocks[s] = time.time()
@@ -134,7 +124,7 @@ def scan(fyers, active_stocks):
 token = get_access_token()
 if not token: sys.exit("🔴 Login Failed.")
 fyers = fyersModel.FyersModel(client_id=APP_ID, token=token, is_async=False)
-send_telegram("🚀 *Bot Online: Top Movers + AlphaTrend Mode*")
+send_telegram("🚀 *Bot Online: Flat-to-Slope Trend Mode*")
 
 full_watchlist = "360ONE,ABB,ABCAPITAL,ADANIENSOL,ADANIENT,ADANIGREEN,ADANIPORTS,ALKEM,AMBER,AMBUJACEM,ANGELONE,APLAPOLLO,APOLLOHOSP,ASHOKLEY,ASIANPAINT,ASTRAL,AUBANK,AUROPHARMA,AXISBANK,BAJAJ_AUTO,BAJAJFINSV,BAJAJHLDNG,BAJFINANCE,BANDHANBNK,BANKBARODA,BANKINDIA,BDL,BEL,BHARATFORG,BHARTIARTL,BHEL,BIOCON,BLUESTARCO,BOSCHLTD,BPCL,BRITANNIA,BSE,CAMS,CANBK,CDSL,CGPOWER,CHOLAFIN,CIPLA,COALINDIA,COFORGE,COLPAL,CONCOR,CROMPTON,CUMMINSIND,DABUR,DALBHARAT,DELHIVERY,DIVISLAB,DIXON,DLF,DMART,DRREDDY,EICHERMOT,ETERNAL,EXIDEIND,FEDERALBNK,FORTIS,GAIL,GLENMARK,GMRAIRPORT,GODREJCP,GODREJPROP,GRASIM,HAL,HAVELLS,HCLTECH,HDFCAMC,HDFCBANK,HDFCLIFE,HEROMOTOCO,HINDALCO,HINDPETRO,HINDUNILVR,HINDZINC,HUDCO,ICICIBANK,ICICIGI,ICICIPRULI,IDEA,IDFCFIRSTB,IEX,IIFL,INDHOTEL,INDIANB,INDIGO,INDUSINDBK,INDUSTOWER,INFY,INOXWIND,IOC,IRCTC,IREDA,IRFC,ITC,JINDALSTEL,JIOFIN,JSWENERGY,JSWSTEEL,JUBLFOOD,KALYANKJIL,KAYNES,KEI,KFINTECH,KOTAKBANK,KPITTECH,LAURUSLABS,LICHSGFIN,LICI,LODHA,LT,LTF,LTIM,LUPIN,M_M,MANAPPURAM,MANKIND,MARICO,MARUTI,MAXHEALTH,MAZDOCK,MCX,MFSL,MOTHERSON,MPHASIS,MUTHOOTFIN,NATIONALUM,NAUKRI,NBCC,NESTLEIND,NHPC,NMDC,NTPC,NUVAMA,NYKAA,OBEROIRLTY,OFSS,OIL,ONGC,PAGEIND,PATANJALI,PAYTM,PERSISTENT,PETRONET,PFC,PGEL,PHOENIXLTD,PIDILITIND,PIIND,PNB,PNBHOUSING,POLICYBZR,POLYCAB,POWERGRID,POWERINDIA,PPLPHARMA,PREMIERENE,PRESTIGE,RBLBANK,RECLTD,RELIANCE,RVNL,SAIL,SAMMAANCAP,SBICARD,SBILIFE,SBIN,SHREECEM,SHRIRAMFIN,SIEMENS,SOLARINDS,SONACOMS,SRF,SUNPHARMA,SUPREMEIND,SUZLON,SWIGGY,SYNGENE,TATACONSUM,TATAELXSI,TATAPOWER,TATASTEEL,TATATECH,TCS,TECHM,TIINDIA,TITAN,TMPV,TORNTPHARM,TORNTPOWER,TRENT,TVSMOTOR,ULTRACEMCO,UNIONBANK,UNITDSPR,UNOMINDA,UPL,VBL,VEDL,VOLTAS,WAAREEENER,WIPRO,YESBANK,ZYDUSLIFE"
 stocks = [s.strip() for s in full_watchlist.split(",")]
