@@ -1,5 +1,4 @@
 import pandas as pd
-import numpy as np
 import datetime
 import time
 import requests
@@ -20,120 +19,127 @@ REDIRECT_URL = "https://www.google.com/"
 TELEGRAM_TOKEN = "8474252007:AAF-BiJGtj8URcEsd9RMUJkDMfJgKoEN_gw"
 TELEGRAM_CHAT_ID = "1250330319"
 
+# AlphaTrend Parameters
 COEFF = 1.0
 AP = 14
-CHANGE_FILTER = 1.012 # 1.2% Gain
-SELL_FILTER = 0.988   # 1.2% Fall
+CHANGE_PCT = 1.2  # 1.2% Day move filter (buyZone/sellZone)
 
 notified_stocks = {}
 
-# --- INDICATOR CALCULATIONS ---
-def get_mfi(df, period):
-    typical_price = (df['high'] + df['low'] + df['close']) / 3
-    money_flow = typical_price * df['volume']
-    pos_flow = money_flow.where(typical_price > typical_price.shift(1), 0).rolling(window=period).sum()
-    neg_flow = money_flow.where(typical_price < typical_price.shift(1), 0).rolling(window=period).sum()
-    if neg_flow.iloc[-1] == 0: return pd.Series([100] * len(df))
-    return 100 - (100 / (1 + (pos_flow / neg_flow)))
+# --- INDICATORS ---
+def get_mfi(df, period=14):
+    tp = (df['high'] + df['low'] + df['close']) / 3
+    mf = tp * df['volume']
+    
+    pos_mf = mf.where(tp > tp.shift(1), 0).rolling(window=period).sum()
+    neg_mf = mf.where(tp < tp.shift(1), 0).rolling(window=period).sum()
+    
+    mfr = pos_mf / neg_mf
+    return 100 - (100 / (1 + mfr))
+
+def get_atr(df, period=14):
+    high_low = df['high'] - df['low']
+    high_close = (df['high'] - df['close'].shift()).abs()
+    low_close = (df['low'] - df['close'].shift()).abs()
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    return ranges.max(axis=1).rolling(window=period).mean()
 
 def calculate_alphatrend(df):
-    tr = pd.concat([df['high']-df['low'], (df['high']-df['close'].shift()).abs(), (df['low']-df['close'].shift()).abs()], axis=1).max(axis=1)
-    atr = tr.rolling(window=AP).mean()
-    upT = df['low'] - atr * COEFF
-    downT = df['high'] + atr * COEFF
-    mfi = get_mfi(df, AP)
-    at = np.zeros(len(df))
+    df['atr'] = get_atr(df, AP)
+    df['mfi'] = get_mfi(df, AP)
+    
+    up_t = df['low'] - df['atr'] * COEFF
+    down_t = df['high'] + df['atr'] * COEFF
+    
+    at = [0.0] * len(df)
     for i in range(1, len(df)):
-        if mfi.iloc[i] >= 50:
-            at[i] = upT.iloc[i] if upT.iloc[i] > at[i-1] else at[i-1]
+        if df['mfi'].iloc[i] >= 50:
+            at[i] = up_t.iloc[i] if up_t.iloc[i] > at[i-1] else at[i-1]
         else:
-            at[i] = downT.iloc[i] if downT.iloc[i] < at[i-1] else at[i-1]
-    return pd.Series(at, index=df.index)
+            at[i] = down_t.iloc[i] if down_t.iloc[i] < at[i-1] else at[i-1]
+    
+    df['at'] = at
+    return df
 
+# --- CORE FUNCTIONS ---
 def send_telegram(msg):
-    try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
+    try:
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
+                      json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
     except: pass
 
 def get_access_token():
     if not args.url: return None
     try:
-        auth_code = re.search(r'auth_code=([^&]+)', args.url).group(1)
-        session = fyersModel.SessionModel(client_id=APP_ID, secret_key=SECRET_ID, redirect_uri=REDIRECT_URL, response_type="code", grant_type="authorization_code")
-        session.set_token(auth_code)
-        return session.generate_token().get("access_token")
-    except: return None
+        match = re.search(r'auth_code=([^&]+)', args.url)
+        if match:
+            auth_code = match.group(1)
+            session = fyersModel.SessionModel(client_id=APP_ID, secret_key=SECRET_ID, redirect_uri=REDIRECT_URL, response_type="code", grant_type="authorization_code")
+            session.set_token(auth_code)
+            return session.generate_token().get("access_token")
+    except Exception as e: print(f"❌ Login Error: {e}")
+    return None
 
-def get_top_movers(fyers, all_stocks):
-    movers = []
-    batch_size = 50
-    for i in range(0, len(all_stocks), batch_size):
-        batch = all_stocks[i:i + batch_size]
-        res = fyers.quotes({"symbols": ",".join([f"NSE:{s}-EQ" for s in batch])})
-        if res['s'] == 'ok':
-            for d in res['d']:
-                if 'lp' in d['v'] and 'open_price' in d['v'] and d['v']['open_price'] != 0:
-                    change = ((d['v']['lp'] - d['v']['open_price']) / d['v']['open_price']) * 100
-                    movers.append({'symbol': d['n'].split(":")[1].replace("-EQ", ""), 'change': change})
-    df = pd.DataFrame(movers)
-    if df.empty: return all_stocks[:40]
-    return list(set(df.nlargest(20, 'change')['symbol'].tolist() + df.nsmallest(20, 'change')['symbol'].tolist()))
+# --- LOGIN ---
+token = get_access_token()
+if token:
+    fyers = fyersModel.FyersModel(client_id=APP_ID, token=token, is_async=False)
+    print("✅ SYSTEM LIVE: AlphaTrend Logic Active")
+    send_telegram("🚀 *Bot Online:* AlphaTrend Strategy Active...")
+else:
+    sys.exit("🔴 Login Failed.")
 
-# --- CORE SCANNER (Updated to Pine Script AlphaTrend Logic) ---
-def scan(fyers, active_stocks):
-    today = datetime.date.today()
-    start_dt = (today - datetime.timedelta(days=10)).strftime('%Y-%m-%d')
-    
-    for s in active_stocks:
+stocks_list = "360ONE,ABB,ABCAPITAL,ADANIENSOL,ADANIENT,ADANIGREEN,ADANIPORTS,ALKEM,AMBER,AMBUJACEM,ANGELONE,APLAPOLLO,APOLLOHOSP,ASHOKLEY,ASIANPAINT,ASTRAL,AUBANK,AUROPHARMA,AXISBANK,BAJAJ_AUTO,BAJAJFINSV,BAJAJHLDNG,BAJFINANCE,BANDHANBNK,BANKBARODA,BANKINDIA,BDL,BEL,BHARATFORG,BHARTIARTL,BHEL,BIOCON,BLUESTARCO,BOSCHLTD,BPCL,BRITANNIA,BSE,CAMS,CANBK,CDSL,CGPOWER,CHOLAFIN,CIPLA,COALINDIA,COFORGE,COLPAL,CONCOR,CROMPTON,CUMMINSIND,DABUR,DALBHARAT,DELHIVERY,DIVISLAB,DIXON,DLF,DMART,DRREDDY,EICHERMOT,ETERNAL,EXIDEIND,FEDERALBNK,FORTIS,GAIL,GLENMARK,GMRAIRPORT,GODREJCP,GODREJPROP,GRASIM,HAL,HAVELLS,HCLTECH,HDFCAMC,HDFCBANK,HDFCLIFE,HEROMOTOCO,HINDALCO,HINDPETRO,HINDUNILVR,HINDZINC,HUDCO,ICICIBANK,ICICIGI,ICICIPRULI,IDEA,IDFCFIRSTB,IEX,IIFL,INDHOTEL,INDIANB,INDIGO,INDUSINDBK,INDUSTOWER,INFY,INOXWIND,IOC,IRCTC,IREDA,IRFC,ITC,JINDALSTEL,JIOFIN,JSWENERGY,JSWSTEEL,JUBLFOOD,KALYANKJIL,KAYNES,KEI,KFINTECH,KOTAKBANK,KPITTECH,LAURUSLABS,LICHSGFIN,LICI,LODHA,LT,LTF,LTIM,LUPIN,M_M,MANAPPURAM,MANKIND,MARICO,MARUTI,MAXHEALTH,MAZDOCK,MCX,MFSL,MOTHERSON,MPHASIS,MUTHOOTFIN,NATIONALUM,NAUKRI,NBCC,NESTLEIND,NHPC,NMDC,NTPC,NUVAMA,NYKAA,OBEROIRLTY,OFSS,OIL,ONGC,PAGEIND,PATANJALI,PAYTM,PERSISTENT,PETRONET,PFC,PGEL,PHOENIXLTD,PIDILITIND,PIIND,PNB,PNBHOUSING,POLICYBZR,POLYCAB,POWERGRID,POWERINDIA,PPLPHARMA,PREMIERENE,PRESTIGE,RBLBANK,RECLTD,RELIANCE,RVNL,SAIL,SAMMAANCAP,SBICARD,SBILIFE,SBIN,SHREECEM,SHRIRAMFIN,SIEMENS,SOLARINDS,SONACOMS,SRF,SUNPHARMA,SUPREMEIND,SUZLON,SWIGGY,SYNGENE,TATACONSUM,TATAELXSI,TATAPOWER,TATASTEEL,TATATECH,TCS,TECHM,TIINDIA,TITAN,TMPV,TORNTPHARM,TORNTPOWER,TRENT,TVSMOTOR,ULTRACEMCO,UNIONBANK,UNITDSPR,UNOMINDA,UPL,VBL,VEDL,VOLTAS,WAAREEENER,WIPRO,YESBANK,ZYDUSLIFE"
+stocks = [s.strip() for s in stocks_list.split(",")]
+
+def scan():
+    today = datetime.date.today().strftime('%Y-%m-%d')
+    start_date = (datetime.date.today() - datetime.timedelta(days=10)).strftime('%Y-%m-%d')
+
+    for s in stocks:
         try:
-            res = fyers.history({"symbol":f"NSE:{s}-EQ","resolution":"5","date_format":"1","range_from":start_dt,"range_to":today.strftime('%Y-%m-%d')})
+            symbol = f"NSE:{s}-EQ"
+            res = fyers.history({"symbol":symbol,"resolution":"5","date_format":"1","range_from":start_date,"range_to":today})
             if res['s'] != 'ok': continue
             
             df = pd.DataFrame(res['candles'], columns=['time','open','high','low','close','volume'])
-            df['at'] = calculate_alphatrend(df)
-            df['at2'] = df['at'].shift(2) # AlphaTrend[2] logic
+            df = calculate_alphatrend(df)
             
-            df_today = df[pd.to_datetime(df['time'], unit='s').dt.date == today].copy()
-            if df_today.empty: continue
-            
+            # Day Open Filter
+            df_today = df[pd.to_datetime(df['time'], unit='s').dt.date == datetime.date.today()]
+            if len(df_today) < 2: continue
             day_open = df_today.iloc[0]['open']
-            curr = df.iloc[-1]
-            prev = df.iloc[-2]
+            curr_price = df.iloc[-1]['close']
+            day_move = ((curr_price - day_open) / day_open) * 100
 
-            signal_type = None
-            
-            # --- FRESH TREND START LOGIC ---
-            # BUY: Jab AlphaTrend line AlphaTrend[2] ko upar cross kare (ta.crossover)
-            buy_cross = (curr['at'] > curr['at2']) and (prev['at'] <= prev['at2'])
-            
-            # SELL: Jab AlphaTrend line AlphaTrend[2] ko niche cross kare (ta.crossunder)
-            sell_cross = (curr['at'] < curr['at2']) and (prev['at'] >= prev['at2'])
+            # Signal Logic (Crossover of AlphaTrend and AlphaTrend[2])
+            # Pine Script: ta.crossover(AlphaTrend, AlphaTrend[2])
+            at_curr = df.iloc[-1]['at']
+            at_prev2 = df.iloc[-3]['at']
+            at_prev1 = df.iloc[-2]['at']
+            at_prev3 = df.iloc[-4]['at']
 
-            # 1.2% Intraday Filter + Fresh Cross
-            if buy_cross and curr['close'] >= (day_open * CHANGE_FILTER):
-                signal_type = "🚀 FRESH BUY TREND"
-            elif sell_cross and curr['close'] <= (day_open * SELL_FILTER):
-                signal_type = "📉 FRESH SELL TREND"
+            buy_signal = at_curr > at_prev2 and at_prev1 <= at_prev3 and day_move >= CHANGE_PCT
+            sell_signal = at_curr < at_prev2 and at_prev1 >= at_prev3 and day_move <= -CHANGE_PCT
 
-            if signal_type and (s not in notified_stocks or time.time() - notified_stocks[s] > 900):
+            if (buy_signal or sell_signal) and s not in notified_stocks:
+                side = "BUY" if buy_signal else "SELL"
+                msg = (f"{'🚀' if side == 'BUY' else '📉'} *AlphaTrend {side}*: {s}\n"
+                       f"━━━━━━━━━━━━━━━━━━\n"
+                       f"💰 Price: {curr_price}\n"
+                       f"📊 Day Move: {day_move:.2f}%\n"
+                       f"🛠 Indicator: AT Crossover")
+                send_telegram(msg)
                 notified_stocks[s] = time.time()
-                send_telegram(f"{signal_type}: *{s}*\nPrice: {curr['close']}\nMove: {((curr['close']-day_open)/day_open)*100:.2f}%")
-            time.sleep(0.01)
-        except: continue
+                
+            time.sleep(0.05)
+        except Exception: continue
 
 # --- MAIN LOOP ---
-token = get_access_token()
-if not token: sys.exit("🔴 Login Failed.")
-fyers = fyersModel.FyersModel(client_id=APP_ID, token=token, is_async=False)
-send_telegram("🚀 *Bot Online: Fresh AlphaTrend Logic*")
-
-full_watchlist = "360ONE,ABB,ABCAPITAL,ADANIENSOL,ADANIENT,ADANIGREEN,ADANIPORTS,ALKEM,AMBER,AMBUJACEM,ANGELONE,APLAPOLLO,APOLLOHOSP,ASHOKLEY,ASIANPAINT,ASTRAL,AUBANK,AUROPHARMA,AXISBANK,BAJAJ_AUTO,BAJAJFINSV,BAJAJHLDNG,BAJFINANCE,BANDHANBNK,BANKBARODA,BANKINDIA,BDL,BEL,BHARATFORG,BHARTIARTL,BHEL,BIOCON,BLUESTARCO,BOSCHLTD,BPCL,BRITANNIA,BSE,CAMS,CANBK,CDSL,CGPOWER,CHOLAFIN,CIPLA,COALINDIA,COFORGE,COLPAL,CONCOR,CROMPTON,CUMMINSIND,DABUR,DALBHARAT,DELHIVERY,DIVISLAB,DIXON,DLF,DMART,DRREDDY,EICHERMOT,ETERNAL,EXIDEIND,FEDERALBNK,FORTIS,GAIL,GLENMARK,GMRAIRPORT,GODREJCP,GODREJPROP,GRASIM,HAL,HAVELLS,HCLTECH,HDFCAMC,HDFCBANK,HDFCLIFE,HEROMOTOCO,HINDALCO,HINDPETRO,HINDUNILVR,HINDZINC,HUDCO,ICICIBANK,ICICIGI,ICICIPRULI,IDEA,IDFCFIRSTB,IEX,IIFL,INDHOTEL,INDIANB,INDIGO,INDUSINDBK,INDUSTOWER,INFY,INOXWIND,IOC,IRCTC,IREDA,IRFC,ITC,JINDALSTEL,JIOFIN,JSWENERGY,JSWSTEEL,JUBLFOOD,KALYANKJIL,KAYNES,KEI,KFINTECH,KOTAKBANK,KPITTECH,LAURUSLABS,LICHSGFIN,LICI,LODHA,LT,LTF,LTIM,LUPIN,M_M,MANAPPURAM,MANKIND,MARICO,MARUTI,MAXHEALTH,MAZDOCK,MCX,MFSL,MOTHERSON,MPHASIS,MUTHOOTFIN,NATIONALUM,NAUKRI,NBCC,NESTLEIND,NHPC,NMDC,NTPC,NUVAMA,NYKAA,OBEROIRLTY,OFSS,OIL,ONGC,PAGEIND,PATANJALI,PAYTM,PERSISTENT,PETRONET,PFC,PGEL,PHOENIXLTD,PIDILITIND,PIIND,PNB,PNBHOUSING,POLICYBZR,POLYCAB,POWERGRID,POWERINDIA,PPLPHARMA,PREMIERENE,PRESTIGE,RBLBANK,RECLTD,RELIANCE,RVNL,SAIL,SAMMAANCAP,SBICARD,SBILIFE,SBIN,SHREECEM,SHRIRAMFIN,SIEMENS,SOLARINDS,SONACOMS,SRF,SUNPHARMA,SUPREMEIND,SUZLON,SWIGGY,SYNGENE,TATACONSUM,TATAELXSI,TATAPOWER,TATASTEEL,TATATECH,TCS,TECHM,TIINDIA,TITAN,TMPV,TORNTPHARM,TORNTPOWER,TRENT,TVSMOTOR,ULTRACEMCO,UNIONBANK,UNITDSPR,UNOMINDA,UPL,VBL,VEDL,VOLTAS,WAAREEENER,WIPRO,YESBANK,ZYDUSLIFE"
-stocks = [s.strip() for s in full_watchlist.split(",")]
-
 while True:
     now = datetime.datetime.now()
     if now.hour == 15 and now.minute >= 31: break
-    if now.minute % 5 == 0 and now.second == 1:
-        active = get_top_movers(fyers, stocks)
-        scan(fyers, active)
+    if now.minute % 5 == 0 and now.second == 5:
+        scan()
         time.sleep(10)
     time.sleep(1)
