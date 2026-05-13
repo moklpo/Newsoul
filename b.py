@@ -12,160 +12,110 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--url", help="Fyers Redirect URL from GitHub Input")
 args = parser.parse_args()
 
-# --- STRATEGY CONFIGURATION ---
+# --- CONFIGURATION ---
 APP_ID = "ESUCFMYU9Q-100"
 SECRET_ID = "1ESVP5WA71"
 REDIRECT_URL = "https://www.google.com/"
 TELEGRAM_TOKEN = "8474252007:AAF-BiJGtj8URcEsd9RMUJkDMfJgKoEN_gw"
 TELEGRAM_CHAT_ID = "1250330319"
 
-CHANGE_THRESHOLD = 1.2    
-BODY_RATIO_MIN = 0.5      # Updated to 0.5
-LOOKBACK = 15           
-NIFTY_LIMIT = 0.15       
-SL_PCT = 0.5             
-
-# --- LOGIC PARAMETERS ---
-EMA_LEN = 5
-PULLBACK_BUFFER = 0.25    # Updated to 0.25
-ATR_MULTIPLIER = 2.0    
-MAX_SIGNALS = 3         
-
-notified_stocks = {}
-
-# --- MANUAL INDICATORS ---
-def get_ema(series, length):
-    return series.ewm(span=length, adjust=False).mean()
-
-def get_atr(df, length=14):
-    high_low = df['high'] - df['low']
-    high_close = (df['high'] - df['close'].shift()).abs()
-    low_close = (df['low'] - df['close'].shift()).abs()
-    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_range = ranges.max(axis=1)
-    return true_range.rolling(window=length).mean()
-
 def get_access_token():
-    if not args.url: return None
+    full_url = args.url
+    if not full_url:
+        print("❌ Error: No URL provided from GitHub Actions!")
+        return None
+    
     try:
-        match = re.search(r'auth_code=([^&]+)', args.url)
+        match = re.search(r'auth_code=([^&]+)', full_url)
         if match:
             auth_code = match.group(1)
-            session = fyersModel.SessionModel(client_id=APP_ID, secret_key=SECRET_ID, redirect_uri=REDIRECT_URL, response_type="code", grant_type="authorization_code")
+            session = fyersModel.SessionModel(
+                client_id=APP_ID, secret_key=SECRET_ID, 
+                redirect_uri=REDIRECT_URL, response_type="code", grant_type="authorization_code"
+            )
             session.set_token(auth_code)
-            return session.generate_token().get("access_token")
+            response = session.generate_token()
+            return response.get("access_token")
+        else:
+            print("❌ Invalid URL: auth_code not found.")
+            return None
     except Exception as e:
         print(f"❌ Login Error: {e}")
-    return None
+        return None
 
-def send_telegram(msg):
-    try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
-    except: pass
-
-def get_perfect_strike(symbol, price, side):
-    if "NIFTY" in symbol and "BANK" not in symbol: step = 50
-    elif "BANKNIFTY" in symbol: step = 100
-    elif price > 1000: step = 10
-    elif price > 500: step = 5
-    else: step = 2.5
-    atm_strike = round(price / step) * step
-    if side == "BUY":
-        return f"{atm_strike + step} CE"
-    else:
-        return f"{atm_strike - step} PE"
-
-# --- LOGIN ---
+# --- MAIN ENGINE ---
 token = get_access_token()
+
 if token:
     fyers = fyersModel.FyersModel(client_id=APP_ID, token=token, is_async=False)
-    print("✅ SYSTEM LIVE: 5 EMA & ATR Filter Active (No TP)")
-    send_telegram("🚀 *Bot Online:* EMA Pullback & ATR Filter Active (No TP)...")
+    print("✅ LOGIN SUCCESSFUL! Bot is live on GitHub.")
+    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
+                  json={"chat_id": TELEGRAM_CHAT_ID, "text": "🚀 *Bot Online:* Scanning with +2%/-2% Directional Filter...", "parse_mode": "Markdown"})
 else:
-    sys.exit("🔴 Login Failed.")
+    sys.exit("🔴 Login Failed. Check URL/Credentials.")
 
+# --- STOCKS LIST ---
 stocks_list = "360ONE,ABB,ABCAPITAL,ADANIENSOL,ADANIENT,ADANIGREEN,ADANIPORTS,ALKEM,AMBER,AMBUJACEM,ANGELONE,APLAPOLLO,APOLLOHOSP,ASHOKLEY,ASIANPAINT,ASTRAL,AUBANK,AUROPHARMA,AXISBANK,BAJAJ_AUTO,BAJAJFINSV,BAJAJHLDNG,BAJFINANCE,BANDHANBNK,BANKBARODA,BANKINDIA,BDL,BEL,BHARATFORG,BHARTIARTL,BHEL,BIOCON,BLUESTARCO,BOSCHLTD,BPCL,BRITANNIA,BSE,CAMS,CANBK,CDSL,CGPOWER,CHOLAFIN,CIPLA,COALINDIA,COFORGE,COLPAL,CONCOR,CROMPTON,CUMMINSIND,DABUR,DALBHARAT,DELHIVERY,DIVISLAB,DIXON,DLF,DMART,DRREDDY,EICHERMOT,ETERNAL,EXIDEIND,FEDERALBNK,FORTIS,GAIL,GLENMARK,GMRAIRPORT,GODREJCP,GODREJPROP,GRASIM,HAL,HAVELLS,HCLTECH,HDFCAMC,HDFCBANK,HDFCLIFE,HEROMOTOCO,HINDALCO,HINDPETRO,HINDUNILVR,HINDZINC,HUDCO,ICICIBANK,ICICIGI,ICICIPRULI,IDEA,IDFCFIRSTB,IEX,IIFL,INDHOTEL,INDIANB,INDIGO,INDUSINDBK,INDUSTOWER,INFY,INOXWIND,IOC,IRCTC,IREDA,IRFC,ITC,JINDALSTEL,JIOFIN,JSWENERGY,JSWSTEEL,JUBLFOOD,KALYANKJIL,KAYNES,KEI,KFINTECH,KOTAKBANK,KPITTECH,LAURUSLABS,LICHSGFIN,LICI,LODHA,LT,LTF,LTIM,LUPIN,M_M,MANAPPURAM,MANKIND,MARICO,MARUTI,MAXHEALTH,MAZDOCK,MCX,MFSL,MOTHERSON,MPHASIS,MUTHOOTFIN,NATIONALUM,NAUKRI,NBCC,NESTLEIND,NHPC,NMDC,NTPC,NUVAMA,NYKAA,OBEROIRLTY,OFSS,OIL,ONGC,PAGEIND,PATANJALI,PAYTM,PERSISTENT,PETRONET,PFC,PGEL,PHOENIXLTD,PIDILITIND,PIIND,PNB,PNBHOUSING,POLICYBZR,POLYCAB,POWERGRID,POWERINDIA,PPLPHARMA,PREMIERENE,PRESTIGE,RBLBANK,RECLTD,RELIANCE,RVNL,SAIL,SAMMAANCAP,SBICARD,SBILIFE,SBIN,SHREECEM,SHRIRAMFIN,SIEMENS,SOLARINDS,SONACOMS,SRF,SUNPHARMA,SUPREMEIND,SUZLON,SWIGGY,SYNGENE,TATACONSUM,TATAELXSI,TATAPOWER,TATASTEEL,TATATECH,TCS,TECHM,TIINDIA,TITAN,TMPV,TORNTPHARM,TORNTPOWER,TRENT,TVSMOTOR,ULTRACEMCO,UNIONBANK,UNITDSPR,UNOMINDA,UPL,VBL,VEDL,VOLTAS,WAAREEENER,WIPRO,YESBANK,ZYDUSLIFE"
 stocks = [s.strip() for s in stocks_list.split(",")]
 
 def scan():
-    today = datetime.date.today()
-    start_date = (today - datetime.timedelta(days=7)).strftime('%Y-%m-%d')
-    today_str = today.strftime('%Y-%m-%d')
+    today = datetime.date.today().strftime('%Y-%m-%d')
+    start_date = (datetime.date.today() - datetime.timedelta(days=7)).strftime('%Y-%m-%d')
     
-    n_res = fyers.history({"symbol":"NSE:NIFTY50-INDEX","resolution":"5","date_format":"1","range_from":start_date,"range_to":today_str})
-    if n_res['s'] != 'ok': return
-    
-    df_nifty = pd.DataFrame(n_res['candles'], columns=['time','open','high','low','close','volume'])
-    df_n_today = df_nifty[pd.to_datetime(df_nifty['time'], unit='s').dt.date == today]
-    
-    if len(df_n_today) < 3: return 
-
-    n_m_open = df_n_today.iloc[0]['open']
-    n_move = ((df_n_today.iloc[-1]['close'] - n_m_open) / n_m_open) * 100
-
     for s in stocks:
         try:
             symbol = f"NSE:{s}-EQ"
-            h5 = fyers.history({"symbol":symbol,"resolution":"5","date_format":"1","range_from":start_date,"range_to":today_str})
-            if h5['s'] != 'ok': continue
-            
-            df = pd.DataFrame(h5['candles'], columns=['time','open','high','low','close','volume'])
-            df['ema5'] = get_ema(df['close'], EMA_LEN)
-            df['atr'] = get_atr(df, 14)
-            
-            curr = df.iloc[-2]
-            df_t = df[pd.to_datetime(df['time'], unit='s').dt.date == today]
-            if len(df_t) < 3: continue 
+            h5 = fyers.history({"symbol":symbol,"resolution":"5","date_format":"1","range_from":start_date,"range_to":today,"cont_flag":"1"})
+            hd = fyers.history({"symbol":symbol,"resolution":"D","date_format":"1","range_from":start_date,"range_to":today,"cont_flag":"1"})
 
-            m_open = df_t.iloc[0]['open']
-            s_move = ((curr['close'] - m_open) / m_open) * 100
-            
-            is_fresh_high = curr['close'] > df.iloc[-(LOOKBACK+2):-2]['high'].max()
-            is_fresh_low = curr['close'] < df.iloc[-(LOOKBACK+2):-2]['low'].min()
-            
-            c_rng = curr['high'] - curr['low']
-            is_strong = c_rng > 0 and (abs(curr['close'] - curr['open']) / c_rng) >= BODY_RATIO_MIN
-            is_not_spike = c_rng <= (curr['atr'] * ATR_MULTIPLIER)
-            
-            d_ema_b = (curr['low'] - curr['ema5']) / curr['ema5'] * 100
-            d_ema_s = (curr['ema5'] - curr['high']) / curr['ema5'] * 100
-            is_buy_pb = curr['low'] <= curr['ema5'] or (d_ema_b <= PULLBACK_BUFFER and curr['low'] > curr['ema5'])
-            is_sell_pb = curr['high'] >= curr['ema5'] or (d_ema_s <= PULLBACK_BUFFER and curr['high'] < curr['ema5'])
-
-            r_buy = not (n_move < -NIFTY_LIMIT and s_move < (n_move * 0.4))
-            w_sell = not (n_move > NIFTY_LIMIT and s_move > (n_move * 0.4))
-
-            if s not in notified_stocks: notified_stocks[s] = {'b': 0, 's': 0, 'last': 0}
-
-            signal = None
-            if s_move >= CHANGE_THRESHOLD and is_fresh_high and is_strong and r_buy and is_buy_pb and curr['close'] > curr['ema5'] and is_not_spike and notified_stocks[s]['b'] < MAX_SIGNALS:
-                signal = "BUY"
-            elif s_move <= -CHANGE_THRESHOLD and is_fresh_low and is_strong and w_sell and is_sell_pb and curr['close'] < curr['ema5'] and is_not_spike and notified_stocks[s]['s'] < MAX_SIGNALS:
-                signal = "SELL"
-
-            if signal and curr['time'] > notified_stocks[s]['last'] + 300:
-                notified_stocks[s]['last'] = curr['time']
-                if signal == "BUY": notified_stocks[s]['b'] += 1
-                else: notified_stocks[s]['s'] += 1
+            if h5['s'] == 'ok' and hd['s'] == 'ok':
+                df5 = pd.DataFrame(h5['candles'], columns=['time','open','high','low','close','volume'])
+                dfd = pd.DataFrame(hd['candles'], columns=['time','open','high','low','close','volume'])
                 
-                sl = round(curr['close'] * (1 - SL_PCT/100 if signal == "BUY" else 1 + SL_PCT/100), 2)
-                perfect_option = get_perfect_strike(s, curr['close'], signal)
+                day_open = dfd.iloc[-1]['open']
+                curr_price = df5.iloc[-2]['close']
                 
-                msg = (f"{'🚀' if signal == 'BUY' else '📉'} *{signal} ALERT*: {s}\n"
-                       f"━━━━━━━━━━━━━━━━━━\n"
-                       f"💰 Price: {curr['close']}\n"
-                       f"📊 Day Move: {s_move:.2f}%\n"
-                       f"🎯 Option: `{perfect_option}`\n"
-                       f"🛡 SL: {sl}")
-                send_telegram(msg)
+                # change_pct: Positive (+) means up from open, Negative (-) means down from open
+                change_pct = ((curr_price - day_open) / day_open) * 100
+                
+                # Pivot Calc
+                prev = dfd.iloc[-2]
+                p = (prev['high'] + prev['low'] + prev['close']) / 3
+                levels = {"P":p, "R1":(2*p)-prev['low'], "S1":(2*p)-prev['high']}
+                
+                c_open, c_high, c_low, c_close = df5.iloc[-2]['open'], df5.iloc[-2]['high'], df5.iloc[-2]['low'], df5.iloc[-2]['close']
+                body = abs(c_close - c_open)
+                rng = c_high - c_low
+                
+                if rng > 0 and (body/rng) >= 0.6:
+                    # ✅ BUY: If Stock is Up > 2% AND Candle is Bullish AND level cross
+                    if change_pct >= 2.0 and c_close > c_open:
+                        for name, val in levels.items():
+                            if c_low <= val and c_close > val:
+                                msg = f"🟢 *BULLISH BUY*: {s}\nPrice: {c_close}\nLevel: {name}\nChange: +{change_pct:.2f}%"
+                                requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
+                                              json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
+                                break
+                    
+                    # ✅ SELL: If Stock is Down < -2% AND Candle is Bearish AND level cross
+                    elif change_pct <= -2.0 and c_close < c_open:
+                        for name, val in levels.items():
+                            if c_high >= val and c_close < val:
+                                msg = f"🔴 *BEARISH SELL*: {s}\nPrice: {c_close}\nLevel: {name}\nChange: {change_pct:.2f}%"
+                                requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
+                                              json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
+                                break
             time.sleep(0.04)
         except: continue
 
 # --- MAIN LOOP ---
 while True:
     now = datetime.datetime.now()
-    if now.hour == 15 and now.minute >= 31: break
+    if now.hour == 15 and now.minute >= 31:
+        break
+        
     if now.minute % 5 == 0 and now.second == 5:
         scan()
         time.sleep(10)
     time.sleep(1)
+
