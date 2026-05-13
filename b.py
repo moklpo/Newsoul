@@ -50,7 +50,7 @@ if token:
     fyers = fyersModel.FyersModel(client_id=APP_ID, token=token, is_async=False)
     print("✅ LOGIN SUCCESSFUL! Bot is live on GitHub.")
     requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
-                  json={"chat_id": TELEGRAM_CHAT_ID, "text": "🚀 *Bot Online:* Scanning with +2%/-2% Directional Filter...", "parse_mode": "Markdown"})
+                  json={"chat_id": TELEGRAM_CHAT_ID, "text": "🚀 *Bot Online:* Scanning with +1.3%/-1.3% Directional Filter...", "parse_mode": "Markdown"})
 else:
     sys.exit("🔴 Login Failed. Check URL/Credentials.")
 
@@ -88,8 +88,8 @@ def scan():
                 rng = c_high - c_low
                 
                 if rng > 0 and (body/rng) >= 0.6:
-                    # ✅ BUY: If Stock is Up > 2% AND Candle is Bullish AND level cross
-                    if change_pct >= 2.0 and c_close > c_open:
+                    # ✅ BUY: If Stock is Up >= 1.3% AND Candle is Bullish AND level cross
+                    if change_pct >= 1.3 and c_close > c_open:
                         for name, val in levels.items():
                             if c_low <= val and c_close > val:
                                 msg = f"🟢 *BULLISH BUY*: {s}\nPrice: {c_close}\nLevel: {name}\nChange: +{change_pct:.2f}%"
@@ -97,8 +97,8 @@ def scan():
                                               json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
                                 break
                     
-                    # ✅ SELL: If Stock is Down < -2% AND Candle is Bearish AND level cross
-                    elif change_pct <= -2.0 and c_close < c_open:
+                    # ✅ SELL: If Stock is Down <= -1.3% AND Candle is Bearish AND level cross
+                    elif change_pct <= -1.3 and c_close < c_open:
                         for name, val in levels.items():
                             if c_high >= val and c_close < val:
                                 msg = f"🔴 *BEARISH SELL*: {s}\nPrice: {c_close}\nLevel: {name}\nChange: {change_pct:.2f}%"
@@ -118,4 +118,3 @@ while True:
         scan()
         time.sleep(10)
     time.sleep(1)
-
