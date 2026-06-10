@@ -18,9 +18,9 @@ args = parser.parse_args()
 #   CONFIGURATION — put real values in env vars or here
 # ============================================================
 APP_ID       = os.getenv("FYERS_APP_ID",      "ESUCFMYU9Q-100")
-SECRET_ID    = os.getenv("FYERS_SECRET_ID",   "YOUR_NEW_SECRET") # regenerate this!
+SECRET_ID    = os.getenv("FYERS_SECRET_ID",   "1ESVP5WA71") # regenerate this!
 REDIRECT_URL = "https://www.google.com/"
-TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN",   "YOUR_NEW_TOKEN")  # regenerate this!
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN",   "8474252007:AAF-BiJGtj8URcEsd9RMUJkDMfJgKoEN_gw")  # regenerate this!
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1250330319")
 
 # ============================================================
