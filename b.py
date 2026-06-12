@@ -18,9 +18,9 @@ args = parser.parse_args()
 #   CONFIGURATION — put real values in env vars or here
 # ============================================================
 APP_ID       = os.getenv("FYERS_APP_ID",      "ESUCFMYU9Q-100")
-SECRET_ID    = os.getenv("FYERS_SECRET_ID",   "1ESVP5WA71") # regenerate this!
+SECRET_ID    = os.getenv("FYERS_SECRET_ID",   "YOUR_NEW_SECRET") # regenerate this!
 REDIRECT_URL = "https://www.google.com/"
-TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN",   "8474252007:AAF-BiJGtj8URcEsd9RMUJkDMfJgKoEN_gw")  # regenerate this!
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN",   "YOUR_NEW_TOKEN")  # regenerate this!
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1250330319")
 
 # ============================================================
@@ -32,6 +32,17 @@ BODY_RATIO_MIN   = 0.5      # candle body / range ratio
 LOOKBACK         = 15       # candles for fresh high/low check
 NIFTY_LIMIT      = 0.15     # nifty move filter
 MAX_SIGNALS      = 3        # max alerts per stock per day
+
+# --- Time session windows ---
+# Prime   9:30 - 11:30 AM — best quality signals
+# Extended 11:30 - 12:30 PM — stricter filters apply
+# Dead zone after 12:30 PM — NO entries, exhaustion zone
+PRIME_SESSION_END_H   = 11
+PRIME_SESSION_END_M   = 30
+EXTENDED_END_H        = 12
+EXTENDED_END_M        = 30
+EXTENDED_THRESHOLD    = 1.8   # higher move needed after 11:30
+EXTENDED_SLOPE_MIN    = 0.12  # steeper slope needed after 11:30
 
 # --- SL / TP (ATR based now) ---
 ATR_SL_MULT = 1.5           # SL = price ± ATR * 1.5
@@ -301,6 +312,18 @@ def scan():
         print("⏳ Waiting for market to settle (9:30 AM)...")
         return
 
+    # Session classification
+    is_prime    = (now.hour < PRIME_SESSION_END_H) or (now.hour == PRIME_SESSION_END_H and now.minute < PRIME_SESSION_END_M)
+    is_extended = not is_prime and ((now.hour < EXTENDED_END_H) or (now.hour == EXTENDED_END_H and now.minute < EXTENDED_END_M))
+    is_dead     = not is_prime and not is_extended
+
+    if is_dead:
+        print(f"  Dead zone after 12:30 PM — skipping scan")
+        return
+
+    session_label = "Prime 9:30-11:30" if is_prime else "Extended 11:30-12:30"
+    print(f"  Session: {session_label}")
+
     today      = datetime.date.today()
     start_date = (today - datetime.timedelta(days=7)).strftime('%Y-%m-%d')
     today_str  = today.strftime('%Y-%m-%d')
@@ -403,22 +426,28 @@ def scan():
             # ── SIGNAL DECISION ──
             signal = None
 
+            # Session-aware thresholds — stricter after 11:30 AM
+            thr       = CHANGE_THRESHOLD if is_prime else EXTENDED_THRESHOLD
+            slp_min   = SLOPE_MIN        if is_prime else EXTENDED_SLOPE_MIN
+            is_45_buy_s  = slp_min <=  slope <= SLOPE_MAX
+            is_45_sell_s = slp_min <= -slope <= SLOPE_MAX
+
             buy_base = (
-                s_move >= CHANGE_THRESHOLD
+                s_move >= thr
                 and is_fresh_high
                 and is_strong
                 and is_not_spike
                 and r_buy
                 and is_buy_pb
                 and curr['close'] > curr['ema5']
-                and is_vol_surge      # volume confirm
-                and is_45_buy         # steady slope
-                and accum_ok          # morning accumulation
+                and is_vol_surge
+                and is_45_buy_s
+                and accum_ok
                 and notified_stocks[s]['b'] < MAX_SIGNALS
             )
 
             sell_base = (
-                s_move <= -CHANGE_THRESHOLD
+                s_move <= -thr
                 and is_fresh_low
                 and is_strong
                 and is_not_spike
@@ -426,7 +455,7 @@ def scan():
                 and is_sell_pb
                 and curr['close'] < curr['ema5']
                 and is_vol_surge
-                and is_45_sell
+                and is_45_sell_s
                 and accum_ok
                 and notified_stocks[s]['s'] < MAX_SIGNALS
             )
@@ -440,6 +469,7 @@ def scan():
             if signal and curr['time'] > notified_stocks[s]['last'] + 300:
 
                 oi_confirmed, oi_msg, oi_score = get_oi_confirmation(fyers, symbol, signal)
+                session_tag = "Prime" if is_prime else "Extended"
                 signal_strength = "🔥 STRONG" if oi_confirmed else "⚡ MODERATE"
 
                 # Only send STRONG signals — or allow MODERATE too?
