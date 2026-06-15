@@ -135,6 +135,168 @@ def get_ohlcv_cvd(df, period=8):
     avg_vol = df['volume'].iloc[-period:].mean()
     return (slope / avg_vol * 100) if avg_vol > 0 else 0.0
 
+
+# ============================================================
+#  PULLBACK BOTTOM DETECTION — Advanced
+# ============================================================
+def detect_pullback_bottom(df, df_today, signal):
+    """
+    Detects if stock is at pullback bottom — best entry point.
+    
+    Conditions for PULLBACK BOTTOM (BUY):
+    1. Trend established — last 8 candles mein 45° upar trend tha
+    2. Pullback depth — 38.2% to 61.8% Fibonacci retracement
+    3. Volume dry up — pullback candles mein volume < 0.8x avg (sellers weak)
+    4. Price near EMA5 — support zone
+    5. Last candle green — buyers wapas aa rahe
+    
+    Returns: (is_pullback_bottom, pullback_score, fib_level, details)
+    """
+    try:
+        if len(df) < 20 or len(df_today) < 5:
+            return False, 0, 0, "Not enough data"
+
+        df = df.copy()
+        df['ema5'] = get_ema(df['close'], 5)
+        df['ema9'] = get_ema(df['close'], 9)
+
+        # Step 1: Find recent swing high/low (trend reference)
+        # Look back 8-15 candles to find the trend base and top
+        lookback = min(15, len(df_today) - 1)
+        recent   = df_today.iloc[-(lookback+1):-1]   # exclude current candle
+
+        if signal == 'BUY':
+            # For BUY: find swing low (trend start) and swing high (before pullback)
+            swing_low  = recent['low'].min()
+            swing_low_idx  = recent['low'].idxmin()
+            
+            # Swing high = highest point AFTER swing low
+            after_low  = recent.loc[swing_low_idx:]
+            if len(after_low) < 3:
+                return False, 0, 0, "Swing high not found"
+            
+            swing_high = after_low['high'].max()
+            trend_range = swing_high - swing_low
+            
+            if trend_range <= 0:
+                return False, 0, 0, "No trend range"
+
+            # Current price for pullback depth calc
+            curr_price = df_today.iloc[-2]['close']
+            
+            # Pullback depth from swing high
+            pullback_pct = (swing_high - curr_price) / trend_range * 100
+            
+            # Fibonacci levels
+            fib_382 = swing_high - 0.382 * trend_range
+            fib_500 = swing_high - 0.500 * trend_range
+            fib_618 = swing_high - 0.618 * trend_range
+            
+            # Check depth — 20% to 65% is valid pullback
+            depth_ok = 20 <= pullback_pct <= 65
+            
+            # Fib level classification
+            if pullback_pct <= 38.2:   fib_label = "38.2%"
+            elif pullback_pct <= 50.0: fib_label = "50%"
+            elif pullback_pct <= 61.8: fib_label = "61.8%"
+            else:                      fib_label = "TOO DEEP"
+
+        else:  # SELL
+            swing_high     = recent['high'].max()
+            swing_high_idx = recent['high'].idxmax()
+            after_high     = recent.loc[swing_high_idx:]
+            
+            if len(after_high) < 3:
+                return False, 0, 0, "Swing low not found"
+            
+            swing_low   = after_high['low'].min()
+            trend_range = swing_high - swing_low
+            
+            if trend_range <= 0:
+                return False, 0, 0, "No trend range"
+
+            curr_price   = df_today.iloc[-2]['close']
+            pullback_pct = (curr_price - swing_low) / trend_range * 100
+            depth_ok     = 20 <= pullback_pct <= 65
+            
+            if pullback_pct <= 38.2:   fib_label = "38.2%"
+            elif pullback_pct <= 50.0: fib_label = "50%"
+            elif pullback_pct <= 61.8: fib_label = "61.8%"
+            else:                      fib_label = "TOO DEEP"
+
+        if not depth_ok:
+            return False, 0, pullback_pct, f"Depth {pullback_pct:.0f}% — {fib_label}"
+
+        # Step 2: Trend quality — last 6 candles before pullback had 45° slope
+        trend_candles = df_today.iloc[-(lookback+1):-(lookback//2)]
+        if len(trend_candles) >= 4:
+            trend_slope = get_slope_pct(trend_candles['close'], min(6, len(trend_candles)))
+            trend_ok = abs(trend_slope) >= 0.06
+        else:
+            trend_ok = True  # assume ok if not enough candles
+
+        # Step 3: Volume dry up during pullback
+        # Last 3 candles (pullback candles) should have low volume
+        pullback_candles = df_today.iloc[-4:-1]  # last 3 candles
+        avg_vol_full     = df['volume'].rolling(VOL_AVG_PERIOD).mean().iloc[-2]
+        
+        if len(pullback_candles) >= 2 and avg_vol_full > 0:
+            pb_avg_vol   = pullback_candles['volume'].mean()
+            vol_ratio_pb = pb_avg_vol / avg_vol_full
+            vol_dry      = vol_ratio_pb <= 0.85  # pullback vol < 85% of avg = dry
+        else:
+            vol_dry      = True
+            vol_ratio_pb = 1.0
+
+        # Step 4: Price near EMA5 or EMA9 (support zone)
+        curr         = df_today.iloc[-2]
+        ema5_now     = df['ema5'].iloc[-2]
+        ema9_now     = df['ema9'].iloc[-2]
+        
+        ema5_dist    = abs(curr['close'] - ema5_now) / ema5_now * 100
+        ema9_dist    = abs(curr['close'] - ema9_now) / ema9_now * 100
+        near_ema     = ema5_dist <= 0.8 or ema9_dist <= 1.2  # within 0.8% of EMA
+
+        # Step 5: Last candle shows reversal sign
+        last_c      = df_today.iloc[-2]
+        prev_c      = df_today.iloc[-3]
+        
+        if signal == 'BUY':
+            # Last candle should be green (close > open) or have long lower wick
+            c_body      = last_c['close'] - last_c['open']
+            c_range     = last_c['high']  - last_c['low']
+            lower_wick  = last_c['open']  - last_c['low']
+            reversal_ok = (c_body > 0) or (c_range > 0 and lower_wick / c_range >= 0.4)
+        else:
+            c_body      = last_c['open']  - last_c['close']
+            c_range     = last_c['high']  - last_c['low']
+            upper_wick  = last_c['high']  - last_c['open']
+            reversal_ok = (c_body > 0) or (c_range > 0 and upper_wick / c_range >= 0.4)
+
+        # ── Pullback Score (0-100) ──
+        pb_score = 0
+        if depth_ok:
+            # Better score for 38.2% than 61.8%
+            if pullback_pct <= 38.2:   pb_score += 40
+            elif pullback_pct <= 50.0: pb_score += 30
+            else:                      pb_score += 20
+        if vol_dry:     pb_score += 25
+        if near_ema:    pb_score += 20
+        if reversal_ok: pb_score += 15
+
+        is_valid = depth_ok and (vol_dry or near_ema) and reversal_ok
+
+        details = (f"Fib:{fib_label} "
+                   f"Vol:{'dry' if vol_dry else 'high'}({vol_ratio_pb:.1f}x) "
+                   f"EMA:{'near' if near_ema else 'far'} "
+                   f"Rev:{'yes' if reversal_ok else 'no'}")
+
+        return is_valid, pb_score, pullback_pct, details
+
+    except Exception as e:
+        return False, 0, 0, f"PB error: {e}"
+
+
 # ============================================================
 #  WEBSOCKET CVD — Real tick-based
 # ============================================================
@@ -714,12 +876,17 @@ def scan():
             if not signal: continue
             if curr['time'] <= notified_stocks[s]['last'] + 300: continue
 
+            # ── PULLBACK BOTTOM DETECTION ──
+            pb_valid, pb_score, pb_depth, pb_details = detect_pullback_bottom(df, df_t, signal)
+            # Pullback bottom = bonus score + priority
+            # Non-pullback signals still pass but get lower score
+
             # Multi-timeframe confirm
             mtf = get_15min_trend(fyers, symbol, today, start_date, today_str)
             if signal == 'BUY'  and mtf == 'BEAR': continue   # 15-min against us
             if signal == 'SELL' and mtf == 'BULL': continue
 
-            # Stock Score
+            # Stock Score — pullback adds 15 bonus points
             score, breakdown = score_stock(
                 s_move, slope, cvd_slope_norm, vol_ratio,
                 is_fresh_high if signal=='BUY' else is_fresh_low,
@@ -727,6 +894,13 @@ def scan():
                 curr['close'] > curr['ema5'],
                 mtf, signal
             )
+            
+            # Pullback bonus
+            if pb_valid:
+                score = min(score + 15, 100)
+                breakdown['pullback'] = pb_score
+            else:
+                breakdown['pullback'] = 0
 
             if score < MIN_SCORE_TO_ALERT:
                 print(f"  ⬇ {s} {signal} score {score}/100 — below threshold, skip")
@@ -741,7 +915,9 @@ def scan():
                 'mtf': mtf, 'buy_sl': buy_sl, 'buy_tp': buy_tp,
                 'sell_sl': sell_sl, 'sell_tp': sell_tp,
                 'avg_vol': avg_vol, 'session_tag': session_tag,
-                'ws_cvd': ws_cvd_norm is not None
+                'ws_cvd': ws_cvd_norm is not None,
+                'pb_valid': pb_valid, 'pb_score': pb_score,
+                'pb_depth': pb_depth, 'pb_details': pb_details
             })
 
             time.sleep(0.05)
@@ -751,7 +927,9 @@ def scan():
             continue
 
     # ── SORT BY SCORE — send top signals only ──
-    candidates.sort(key=lambda x: x['score'], reverse=True)
+    # Sort — pullback bottom stocks get priority (score + 15 already added)
+    # Secondary sort: pullback valid first
+    candidates.sort(key=lambda x: (x['pb_valid'], x['score']), reverse=True)
 
     for c in candidates:
         s = c['s']
@@ -774,11 +952,13 @@ def scan():
         perfect_option = get_perfect_strike(s, c['curr']['close'], c['signal'])
         cvd_src = "WS" if c['ws_cvd'] else "OHLCV"
         emoji   = "🚀" if c['signal'] == 'BUY' else "📉"
+        pb_tag  = "📍 *PULLBACK BOTTOM*" if c.get('pb_valid') else "📈 Momentum"
 
         bd = c['breakdown']
         msg = (
             f"{emoji} 🔥 *STRONG {c['signal']}*: `{s}` {c['session_tag']}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
+            f"{pb_tag}\n"
             f"⭐ Score  : *{c['score']}/100*\n"
             f"💰 Price  : ₹{c['curr']['close']}\n"
             f"📊 Move   : {c['s_move']:+.2f}%\n"
@@ -791,7 +971,7 @@ def scan():
             f"🛡 SL     : ₹{sl}  |  🎯 TP: ₹{tp}\n"
             f"⚖️ RR     : 1:{rr}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"📋 _Move:{bd['move']} Slope:{bd['slope']} CVD:{bd['cvd']} Vol:{bd['volume']} Fresh:{bd['fresh']} Candle:{bd['candle']} MTF:{bd['mtf']}_"
+            f"📋 _Move:{bd['move']} Slope:{bd['slope']} CVD:{bd['cvd']} Vol:{bd['volume']} PB:{bd.get('pullback',0)} MTF:{bd['mtf']}_"
         )
         send_telegram(msg)
         print(f"  ✅ ALERT: {s} {c['signal']} | Score:{c['score']} | OI:{oi_msg} | CVD:{c['cvd_slope_norm']:+.2f} | MTF:{c['mtf']}")
