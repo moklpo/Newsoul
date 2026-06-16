@@ -2,4 +2,9 @@ fastapi
 uvicorn
 pandas
 numpy
-yfinance
+vectorbt
+pyarrow
+requests
+python-multipart
+python-dotenv
+pydantic
