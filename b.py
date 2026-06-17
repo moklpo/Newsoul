@@ -1,576 +1,212 @@
-"""
-╔══════════════════════════════════════════════════════════════╗
-║          TRADING BOT v3 — MAXIMUM ACCURACY EDITION          ║
-║                                                              ║
-║  Filters stacked (hardest to pass = best stock only):        ║
-║  1. WebSocket CVD — real tick-based (most accurate)          ║
-║  2. Stock Scoring System (0-100) — top score only            ║
-║  3. 15-min trend confirm (multi-timeframe)                   ║
-║  4. 5-min EMA5 pullback + slope (45° angle)                  ║
-║  5. Volume surge (1.5x avg)                                  ║
-║  6. OI confirmation (Fyers option chain)                     ║
-║  7. Nifty regime filter                                      ║
-║  8. Session time filter (Prime / Extended / Dead zone)       ║
-║  9. Sell side extra strict (OI=2, time 9:30-11:15 only)      ║
-╚══════════════════════════════════════════════════════════════╝
-"""
-
 from fyers_apiv3 import fyersModel
-from fyers_apiv3.FyersWebsocket import data_ws
 import pandas as pd
 import numpy as np
 import datetime
-import threading
 import time
 import requests
 import re
 import argparse
 import sys
 import os
-from collections import deque
 
-# ── CLI ──────────────────────────────────────────────────────
+# --- INPUT HANDLING FOR GITHUB ---
 parser = argparse.ArgumentParser()
-parser.add_argument("--url", help="Fyers Redirect URL")
+parser.add_argument("--url", help="Fyers Redirect URL from GitHub Input")
 args = parser.parse_args()
 
 # ============================================================
-#  CREDENTIALS
+#   CONFIGURATION — put real values in env vars or here
 # ============================================================
-APP_ID           = "ESUCFMYU9Q-100"
-SECRET_ID        = "1ESVP5WA71"
-REDIRECT_URL     = "https://www.google.com/"
-TELEGRAM_TOKEN   = "8474252007:AAF-BiJGtj8URcEsd9RMUJkDMfJgKoEN_gw"
-TELEGRAM_CHAT_ID = "1250330319"
-
-# ============================================================
-#  STRATEGY PARAMETERS
-# ============================================================
-# ── Core filters ──
-CHANGE_THRESHOLD  = 1.2    # min day move % for signal
-BODY_RATIO_MIN    = 0.5    # candle body / range ratio
-LOOKBACK          = 15     # candles for fresh high/low
-NIFTY_LIMIT       = 0.15   # nifty move filter threshold
-MAX_SIGNALS       = 3      # max alerts per stock per day
-
-# ── SL / TP ──
-ATR_SL_MULT       = 1.5    # SL  = price ± ATR × 1.5
-ATR_TP_MULT       = 3.0    # TP  = price ± ATR × 3.0  → 1:2 RR
-ATR_SPIKE_MULT    = 2.0    # candle > ATR×2 = spike, skip
-
-# ── EMA pullback ──
-EMA_LEN           = 5
-PULLBACK_BUFFER   = 0.25
-
-# ── Slope (45° angle) ──
-SLOPE_PERIOD      = 6
-SLOPE_MIN         = 0.06
-SLOPE_MAX         = 0.40
-
-# ── Volume ──
-VOL_AVG_PERIOD    = 20
-VOL_SURGE_MULT    = 1.5    # raised from 1.4 → 1.5 for better quality
-
-# ── Session windows ──
-PRIME_END_H, PRIME_END_M      = 11, 30   # Prime   9:30 – 11:30
-EXTENDED_END_H, EXTENDED_END_M = 12, 30  # Extended 11:30 – 12:30
-EXTENDED_THRESHOLD = 1.8                  # stricter threshold after 11:30
-EXTENDED_SLOPE_MIN = 0.12
-
-# ── OI ──
-OI_STRIKE_COUNT     = 5
-OI_MIN_SCORE_BUY    = 2    # out of 3
-OI_MIN_SCORE_SELL   = 2    # strict — same as buy
-
-# ── Stock Scoring ──
-MIN_SCORE_TO_ALERT  = 70   # out of 100 — only best stocks alert
-
-# ── WebSocket CVD ──
-CVD_TICK_WINDOW     = 200  # last N ticks per stock for CVD
-CVD_SLOPE_BULL      =  0.3 # normalized slope threshold for BUY
-CVD_SLOPE_BEAR      = -0.3 # normalized slope threshold for SELL
-
-# ── 15-min multi-timeframe ──
-MTF_EMA_LEN         = 9    # 15-min EMA length for trend confirm
+APP_ID       = os.getenv("FYERS_APP_ID",      "ESUCFMYU9Q-100")
+SECRET_ID    = os.getenv("FYERS_SECRET_ID",   "1ESVP5WA71") # regenerate this!
+REDIRECT_URL = "https://www.google.com/"
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN",  "8474252007:AAF-BiJGtj8URcEsd9RMUJkDMfJgKoEN_gw")  # regenerate this!
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1250330319")
 
 # ============================================================
-#  GLOBAL STATE
+#   STRATEGY PARAMETERS
 # ============================================================
-notified_stocks  = {}
-ws_cvd_store     = {}      # {symbol: deque of (price, volume, direction)}
-ws_cvd_lock      = threading.Lock()
-ws_connected     = threading.Event()
+# --- existing filters ---
+CHANGE_THRESHOLD = 1.2      # min % day move to consider
+BODY_RATIO_MIN   = 0.5      # candle body / range ratio
+LOOKBACK         = 15       # candles for fresh high/low check
+NIFTY_LIMIT      = 0.15     # nifty move filter
+MAX_SIGNALS      = 3        # max alerts per stock per day
+
+# --- Time session windows ---
+# Prime   9:30 - 11:30 AM — best quality signals
+# Extended 11:30 - 12:30 PM — stricter filters apply
+# Dead zone after 12:30 PM — NO entries, exhaustion zone
+PRIME_SESSION_END_H   = 11
+PRIME_SESSION_END_M   = 30
+EXTENDED_END_H        = 12
+EXTENDED_END_M        = 30
+EXTENDED_THRESHOLD    = 1.8   # higher move needed after 11:30
+EXTENDED_SLOPE_MIN    = 0.12  # steeper slope needed after 11:30
+
+# --- SL / TP (ATR based now) ---
+ATR_SL_MULT = 1.5           # SL = price ± ATR * 1.5
+ATR_TP_MULT = 3.0           # TP = price ± ATR * 3.0  (1:2 RR)
+ATR_SPIKE_MULT = 2.0        # candle range > ATR*2 = spike, skip
+
+# --- EMA pullback ---
+EMA_LEN        = 5
+PULLBACK_BUFFER = 0.25
+
+# --- NEW: Slope / angle filter (5-min candles) ---
+SLOPE_PERIOD  = 6           # last 6 candles for slope calc
+SLOPE_MIN     = 0.06        # min % per candle — not sideways
+SLOPE_MAX     = 0.40        # max % per candle — not a spike
+
+# --- NEW: Slow accumulation (before 10:30 AM) ---
+ACCUM_MOVE_MIN = 0.8        # min % move by 10:30 AM
+ACCUM_MOVE_MAX = 2.5        # max % move by 10:30 AM (controlled)
+ACCUM_BODY_AVG = 0.40       # avg candle body ratio — consistent
+
+# --- NEW: Volume surge ---
+VOL_AVG_PERIOD  = 20        # rolling avg candles
+VOL_SURGE_MULT  = 1.4       # current vol > avg * 1.4
+
+# --- NEW: OI confirmation ---
+OI_STRIKE_COUNT = 5         # strikes each side for OI scan
+OI_MIN_SCORE_BUY  = 2       # min score out of 3 for BUY
+OI_MIN_SCORE_SELL = 1       # min score out of 2 for SELL
 
 # ============================================================
-#  INDICATORS
+notified_stocks = {}
+
+# ============================================================
+#   INDICATORS
 # ============================================================
 def get_ema(series, length):
     return series.ewm(span=length, adjust=False).mean()
 
 def get_atr(df, length=14):
-    hl  = df['high'] - df['low']
-    hc  = (df['high'] - df['close'].shift()).abs()
-    lc  = (df['low']  - df['close'].shift()).abs()
-    tr  = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+    high_low    = df['high'] - df['low']
+    high_close  = (df['high'] - df['close'].shift()).abs()
+    low_close   = (df['low']  - df['close'].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     return tr.rolling(window=length).mean()
 
 def get_slope_pct(series, period=6):
+    """
+    Linear regression slope over last `period` candles.
+    Returns slope as % of starting price per candle.
+    45-degree steady climb = 0.06 to 0.40 range.
+    """
     y = series.iloc[-period:].values.astype(float)
     x = np.arange(period)
-    if len(y) < period or y[0] == 0:
+    if len(y) < period:
         return 0.0
     slope, _ = np.polyfit(x, y, 1)
-    return (slope / y[0]) * 100
-
-def get_ohlcv_cvd(df, period=8):
-    """Fallback OHLCV CVD when WebSocket not yet warm."""
-    delta = df.apply(
-        lambda r: r['volume'] if r['close'] >= r['open'] else -r['volume'], axis=1
-    )
-    cvd = delta.cumsum()
-    recent = cvd.iloc[-period:].values.astype(float)
-    if len(recent) < period:
-        return 0.0
-    slope, _ = np.polyfit(np.arange(period), recent, 1)
-    avg_vol = df['volume'].iloc[-period:].mean()
-    return (slope / avg_vol * 100) if avg_vol > 0 else 0.0
-
+    base = y[0] if y[0] != 0 else 1.0
+    return (slope / base) * 100
 
 # ============================================================
-#  PULLBACK BOTTOM DETECTION — Advanced
-# ============================================================
-def detect_pullback_bottom(df, df_today, signal):
-    """
-    Detects if stock is at pullback bottom — best entry point.
-    
-    Conditions for PULLBACK BOTTOM (BUY):
-    1. Trend established — last 8 candles mein 45° upar trend tha
-    2. Pullback depth — 38.2% to 61.8% Fibonacci retracement
-    3. Volume dry up — pullback candles mein volume < 0.8x avg (sellers weak)
-    4. Price near EMA5 — support zone
-    5. Last candle green — buyers wapas aa rahe
-    
-    Returns: (is_pullback_bottom, pullback_score, fib_level, details)
-    """
-    try:
-        if len(df) < 20 or len(df_today) < 5:
-            return False, 0, 0, "Not enough data"
-
-        df = df.copy()
-        df['ema5'] = get_ema(df['close'], 5)
-        df['ema9'] = get_ema(df['close'], 9)
-
-        # Step 1: Find recent swing high/low (trend reference)
-        # Look back 8-15 candles to find the trend base and top
-        lookback = min(15, len(df_today) - 1)
-        recent   = df_today.iloc[-(lookback+1):-1]   # exclude current candle
-
-        if signal == 'BUY':
-            # For BUY: find swing low (trend start) and swing high (before pullback)
-            swing_low  = recent['low'].min()
-            swing_low_idx  = recent['low'].idxmin()
-            
-            # Swing high = highest point AFTER swing low
-            after_low  = recent.loc[swing_low_idx:]
-            if len(after_low) < 3:
-                return False, 0, 0, "Swing high not found"
-            
-            swing_high = after_low['high'].max()
-            trend_range = swing_high - swing_low
-            
-            if trend_range <= 0:
-                return False, 0, 0, "No trend range"
-
-            # Current price for pullback depth calc
-            curr_price = df_today.iloc[-2]['close']
-            
-            # Pullback depth from swing high
-            pullback_pct = (swing_high - curr_price) / trend_range * 100
-            
-            # Fibonacci levels
-            fib_382 = swing_high - 0.382 * trend_range
-            fib_500 = swing_high - 0.500 * trend_range
-            fib_618 = swing_high - 0.618 * trend_range
-            
-            # Check depth — 20% to 65% is valid pullback
-            depth_ok = 20 <= pullback_pct <= 65
-            
-            # Fib level classification
-            if pullback_pct <= 38.2:   fib_label = "38.2%"
-            elif pullback_pct <= 50.0: fib_label = "50%"
-            elif pullback_pct <= 61.8: fib_label = "61.8%"
-            else:                      fib_label = "TOO DEEP"
-
-        else:  # SELL
-            swing_high     = recent['high'].max()
-            swing_high_idx = recent['high'].idxmax()
-            after_high     = recent.loc[swing_high_idx:]
-            
-            if len(after_high) < 3:
-                return False, 0, 0, "Swing low not found"
-            
-            swing_low   = after_high['low'].min()
-            trend_range = swing_high - swing_low
-            
-            if trend_range <= 0:
-                return False, 0, 0, "No trend range"
-
-            curr_price   = df_today.iloc[-2]['close']
-            pullback_pct = (curr_price - swing_low) / trend_range * 100
-            depth_ok     = 20 <= pullback_pct <= 65
-            
-            if pullback_pct <= 38.2:   fib_label = "38.2%"
-            elif pullback_pct <= 50.0: fib_label = "50%"
-            elif pullback_pct <= 61.8: fib_label = "61.8%"
-            else:                      fib_label = "TOO DEEP"
-
-        if not depth_ok:
-            return False, 0, pullback_pct, f"Depth {pullback_pct:.0f}% — {fib_label}"
-
-        # Step 2: Trend quality — last 6 candles before pullback had 45° slope
-        trend_candles = df_today.iloc[-(lookback+1):-(lookback//2)]
-        if len(trend_candles) >= 4:
-            trend_slope = get_slope_pct(trend_candles['close'], min(6, len(trend_candles)))
-            trend_ok = abs(trend_slope) >= 0.06
-        else:
-            trend_ok = True  # assume ok if not enough candles
-
-        # Step 3: Volume dry up during pullback
-        # Last 3 candles (pullback candles) should have low volume
-        pullback_candles = df_today.iloc[-4:-1]  # last 3 candles
-        avg_vol_full     = df['volume'].rolling(VOL_AVG_PERIOD).mean().iloc[-2]
-        
-        if len(pullback_candles) >= 2 and avg_vol_full > 0:
-            pb_avg_vol   = pullback_candles['volume'].mean()
-            vol_ratio_pb = pb_avg_vol / avg_vol_full
-            vol_dry      = vol_ratio_pb <= 0.85  # pullback vol < 85% of avg = dry
-        else:
-            vol_dry      = True
-            vol_ratio_pb = 1.0
-
-        # Step 4: Price near EMA5 or EMA9 (support zone)
-        curr         = df_today.iloc[-2]
-        ema5_now     = df['ema5'].iloc[-2]
-        ema9_now     = df['ema9'].iloc[-2]
-        
-        ema5_dist    = abs(curr['close'] - ema5_now) / ema5_now * 100
-        ema9_dist    = abs(curr['close'] - ema9_now) / ema9_now * 100
-        near_ema     = ema5_dist <= 0.8 or ema9_dist <= 1.2  # within 0.8% of EMA
-
-        # Step 5: Last candle shows reversal sign
-        last_c      = df_today.iloc[-2]
-        prev_c      = df_today.iloc[-3]
-        
-        if signal == 'BUY':
-            # Last candle should be green (close > open) or have long lower wick
-            c_body      = last_c['close'] - last_c['open']
-            c_range     = last_c['high']  - last_c['low']
-            lower_wick  = last_c['open']  - last_c['low']
-            reversal_ok = (c_body > 0) or (c_range > 0 and lower_wick / c_range >= 0.4)
-        else:
-            c_body      = last_c['open']  - last_c['close']
-            c_range     = last_c['high']  - last_c['low']
-            upper_wick  = last_c['high']  - last_c['open']
-            reversal_ok = (c_body > 0) or (c_range > 0 and upper_wick / c_range >= 0.4)
-
-        # ── Pullback Score (0-100) ──
-        pb_score = 0
-        if depth_ok:
-            # Better score for 38.2% than 61.8%
-            if pullback_pct <= 38.2:   pb_score += 40
-            elif pullback_pct <= 50.0: pb_score += 30
-            else:                      pb_score += 20
-        if vol_dry:     pb_score += 25
-        if near_ema:    pb_score += 20
-        if reversal_ok: pb_score += 15
-
-        is_valid = depth_ok and (vol_dry or near_ema) and reversal_ok
-
-        details = (f"Fib:{fib_label} "
-                   f"Vol:{'dry' if vol_dry else 'high'}({vol_ratio_pb:.1f}x) "
-                   f"EMA:{'near' if near_ema else 'far'} "
-                   f"Rev:{'yes' if reversal_ok else 'no'}")
-
-        return is_valid, pb_score, pullback_pct, details
-
-    except Exception as e:
-        return False, 0, 0, f"PB error: {e}"
-
-
-# ============================================================
-#  WEBSOCKET CVD — Real tick-based
-# ============================================================
-def ws_on_message(msg):
-    """
-    Fyers WebSocket tick message handler.
-    Each tick has: symbol, ltp, vol (traded qty this tick).
-    We infer direction from price movement vs prev tick.
-    CVD += vol if price up, -= vol if price down.
-    """
-    try:
-        if not isinstance(msg, dict):
-            return
-        sym  = msg.get('symbol', '')
-        ltp  = msg.get('ltp', 0)
-        vol  = msg.get('vol', 0) or msg.get('volume', 0)
-
-        if not sym or ltp == 0:
-            return
-
-        with ws_cvd_lock:
-            if sym not in ws_cvd_store:
-                ws_cvd_store[sym] = deque(maxlen=CVD_TICK_WINDOW)
-
-            q = ws_cvd_store[sym]
-            if len(q) > 0:
-                prev_ltp = q[-1][0]
-                direction = 1 if ltp >= prev_ltp else -1
-            else:
-                direction = 1
-
-            q.append((ltp, vol, direction))
-    except Exception as e:
-        pass
-
-def ws_on_connect(msg):
-    print("✅ WebSocket connected")
-    ws_connected.set()
-
-def ws_on_error(msg):
-    print(f"⚠ WebSocket error: {msg}")
-
-def ws_on_close(msg):
-    print(f"WebSocket closed: {msg}")
-    ws_connected.clear()
-
-def get_ws_cvd_slope(symbol):
-    """
-    Calculate CVD slope from WebSocket tick deque.
-    Returns normalized slope — positive = buying pressure, negative = selling.
-    Returns None if not enough ticks yet (fallback to OHLCV).
-    """
-    with ws_cvd_lock:
-        q = ws_cvd_store.get(symbol)
-        if not q or len(q) < 20:
-            return None   # not enough data yet
-
-        ticks = list(q)
-
-    # Build cumulative delta from ticks
-    cvd = []
-    running = 0
-    for ltp, vol, direction in ticks:
-        running += vol * direction
-        cvd.append(running)
-
-    cvd = np.array(cvd, dtype=float)
-
-    # Slope of last 20 ticks
-    n   = min(20, len(cvd))
-    y   = cvd[-n:]
-    x   = np.arange(n)
-    slope, _ = np.polyfit(x, y, 1)
-
-    # Normalize by avg volume
-    avg_vol = np.mean([t[1] for t in ticks[-n:]]) or 1
-    return slope / avg_vol
-
-# ============================================================
-#  MULTI-TIMEFRAME (15-min trend)
-# ============================================================
-def get_15min_trend(fyers_client, symbol, today, start_date, today_str):
-    """
-    15-min chart trend confirm.
-    Returns: 'BULL', 'BEAR', or 'NEUTRAL'
-    """
-    try:
-        r = fyers_client.history({
-            "symbol": symbol, "resolution": "15",
-            "date_format": "1", "range_from": start_date, "range_to": today_str
-        })
-        if r['s'] != 'ok':
-            return 'NEUTRAL'
-
-        df15 = pd.DataFrame(r['candles'], columns=['time','open','high','low','close','volume'])
-        df15_t = df15[pd.to_datetime(df15['time'], unit='s').dt.date == today]
-
-        if len(df15_t) < 3:
-            return 'NEUTRAL'
-
-        df15_t = df15_t.copy()
-        df15_t['ema9'] = get_ema(df15_t['close'], MTF_EMA_LEN)
-
-        last = df15_t.iloc[-1]
-        prev = df15_t.iloc[-2]
-
-        # Bull: price above EMA9, EMA9 rising, last candle green
-        if (last['close'] > last['ema9']
-                and last['ema9'] > prev['ema9']
-                and last['close'] > last['open']):
-            return 'BULL'
-
-        # Bear: price below EMA9, EMA9 falling, last candle red
-        if (last['close'] < last['ema9']
-                and last['ema9'] < prev['ema9']
-                and last['close'] < last['open']):
-            return 'BEAR'
-
-        return 'NEUTRAL'
-    except:
-        return 'NEUTRAL'
-
-# ============================================================
-#  STOCK SCORING (0 – 100)
-# ============================================================
-def score_stock(s_move, slope, cvd_slope_norm, vol_ratio,
-                is_fresh, is_strong, is_not_spike,
-                ema_aligned, mtf_trend, signal):
-    """
-    Score a stock 0-100. Higher = better setup.
-    Only stocks >= MIN_SCORE_TO_ALERT get alerted.
-
-    Breakdown:
-      Day move strength      : 20 pts
-      Slope quality          : 15 pts
-      CVD strength           : 20 pts
-      Volume surge           : 15 pts
-      Fresh high/low         : 10 pts
-      Strong candle body     : 10 pts
-      MTF trend alignment    : 10 pts
-    """
-    score = 0
-    breakdown = {}
-
-    # Day move (20 pts)
-    move_abs = abs(s_move)
-    if   move_abs >= 3.5: pts = 20
-    elif move_abs >= 2.5: pts = 16
-    elif move_abs >= 1.8: pts = 12
-    elif move_abs >= 1.2: pts = 8
-    else:                 pts = 4
-    score += pts; breakdown['move'] = pts
-
-    # Slope quality (15 pts)
-    slope_abs = abs(slope)
-    if   0.15 <= slope_abs <= 0.30: pts = 15   # perfect 45°
-    elif 0.10 <= slope_abs <= 0.35: pts = 10
-    elif 0.06 <= slope_abs <= 0.40: pts = 6
-    else:                           pts = 0
-    score += pts; breakdown['slope'] = pts
-
-    # CVD strength (20 pts)
-    if cvd_slope_norm is not None:
-        cvd_abs = abs(cvd_slope_norm)
-        if   cvd_abs >= 2.0: pts = 20
-        elif cvd_abs >= 1.0: pts = 15
-        elif cvd_abs >= 0.5: pts = 10
-        elif cvd_abs >= 0.3: pts = 6
-        else:                pts = 2
-    else:
-        pts = 8   # OHLCV fallback — partial credit
-    score += pts; breakdown['cvd'] = pts
-
-    # Volume surge (15 pts)
-    if   vol_ratio >= 3.0: pts = 15
-    elif vol_ratio >= 2.0: pts = 12
-    elif vol_ratio >= 1.5: pts = 8
-    elif vol_ratio >= 1.2: pts = 4
-    else:                  pts = 0
-    score += pts; breakdown['volume'] = pts
-
-    # Fresh high/low (10 pts)
-    pts = 10 if is_fresh else 0
-    score += pts; breakdown['fresh'] = pts
-
-    # Strong candle (10 pts)
-    pts = 10 if (is_strong and is_not_spike) else (5 if is_strong else 0)
-    score += pts; breakdown['candle'] = pts
-
-    # MTF trend (10 pts)
-    if signal == 'BUY'  and mtf_trend == 'BULL': pts = 10
-    elif signal == 'SELL' and mtf_trend == 'BEAR': pts = 10
-    elif mtf_trend == 'NEUTRAL':                   pts = 5
-    else:                                          pts = 0
-    score += pts; breakdown['mtf'] = pts
-
-    return min(score, 100), breakdown
-
-# ============================================================
-#  OI CONFIRMATION
+#   OI CONFIRMATION  (Fyers option chain)
 # ============================================================
 def get_oi_confirmation(fyers_client, raw_symbol, signal_side):
+    """
+    Fetch ATM option chain OI change from Fyers.
+    BUY  → CE OI rising (fresh longs) + PE OI falling (put unwinding)
+    SELL → PE OI rising (fresh shorts) + CE OI falling (call unwinding)
+    Returns (confirmed: bool, message: str, score: int)
+    """
     try:
         stock = raw_symbol.replace("NSE:", "").replace("-EQ", "")
-        resp  = fyers_client.optionchain({
-            "symbol": f"NSE:{stock}-EQ",
+        resp = fyers_client.optionchain({
+            "symbol":      f"NSE:{stock}-EQ",
             "strikecount": OI_STRIKE_COUNT,
-            "timestamp": ""
+            "timestamp":   ""
         })
 
         if resp.get('s') != 'ok':
             return False, "OI N/A", 0
 
+        # Fyers v3: optionsChain directly inside data, first entry is equity (skip it)
         full_chain = resp['data']['optionsChain']
-        chain = [x for x in full_chain if x.get('option_type') in ('CE','PE')]
+        chain = [x for x in full_chain if x.get('option_type') in ('CE', 'PE')]
+
         if not chain:
             return False, "OI empty", 0
 
-        ltp_entry  = next((x for x in full_chain if x.get('option_type') == ''), None)
-        ltp        = ltp_entry.get('ltp', 0) if ltp_entry else 0
-        strikes    = sorted(set(x['strike_price'] for x in chain))
+        # Find ATM strike closest to LTP
+        ltp_entry = next((x for x in full_chain if x.get('option_type') == ''), None)
+        ltp = ltp_entry.get('ltp', 0) if ltp_entry else 0
+        strikes = sorted(set(x['strike_price'] for x in chain))
         atm_strike = min(strikes, key=lambda x: abs(x - ltp)) if ltp else strikes[len(strikes)//2]
 
+        # ATM ± 2 strikes
         atm_idx   = strikes.index(atm_strike)
         atm_range = set(strikes[max(0, atm_idx-2): atm_idx+3])
         atm_slice = [x for x in chain if x['strike_price'] in atm_range]
 
+        # oich = OI change field in Fyers v3
         ce_oi_chg = sum(x.get('oich', 0) or 0 for x in atm_slice if x['option_type'] == 'CE')
         pe_oi_chg = sum(x.get('oich', 0) or 0 for x in atm_slice if x['option_type'] == 'PE')
 
-        score  = 0
+        score = 0
         detail = []
 
         if signal_side == "BUY":
-            if ce_oi_chg > 0:                          score += 1; detail.append("CE OI↑")
-            if pe_oi_chg < 0:                          score += 1; detail.append("PE OI↓")
-            if ce_oi_chg > abs(pe_oi_chg) * 0.5:      score += 1; detail.append("CE dom")
+            if ce_oi_chg > 0:
+                score += 1
+                detail.append("CE OI↑")          # fresh call buyers
+            if pe_oi_chg < 0:
+                score += 1
+                detail.append("PE OI↓")          # put unwinding
+            if ce_oi_chg > abs(pe_oi_chg) * 0.5:
+                score += 1
+                detail.append("CE dominant")
             confirmed = score >= OI_MIN_SCORE_BUY
-        else:
-            if pe_oi_chg > 0:                          score += 1; detail.append("PE OI↑")
-            if ce_oi_chg < 0:                          score += 1; detail.append("CE OI↓")
-            if pe_oi_chg > abs(ce_oi_chg) * 0.5:      score += 1; detail.append("PE dom")
+
+        else:  # SELL
+            if pe_oi_chg > 0:
+                score += 1
+                detail.append("PE OI↑")          # fresh put buyers
+            if ce_oi_chg < 0:
+                score += 1
+                detail.append("CE OI↓")          # call unwinding
             confirmed = score >= OI_MIN_SCORE_SELL
 
         msg = f"OI {score}✓ ({', '.join(detail)})" if detail else f"OI {score}✓"
         return confirmed, msg, score
 
     except Exception as e:
-        print(f"  OI error [{raw_symbol}]: {e}")
+        print(f"  ⚠ OI error [{raw_symbol}]: {e}")
         return False, "OI err", 0
 
 # ============================================================
-#  SLOW ACCUMULATION
+#   SLOW ACCUMULATION CHECK
 # ============================================================
 def is_slow_accumulation(df_today):
+    """
+    Before 10:30 AM: stock should have moved 0.8–2.5% steadily.
+    After 10:30 AM: bypass this filter (normal momentum logic).
+    Consistent candle bodies = genuine buying, not noise.
+    """
     now = datetime.datetime.now()
     if now.hour > 10 or (now.hour == 10 and now.minute >= 30):
-        return True
+        return True  # after 10:30 AM — skip this filter
 
     if len(df_today) < 3:
         return False
 
-    m_open  = df_today.iloc[0]['open']
+    m_open = df_today.iloc[0]['open']
     c_price = df_today.iloc[-1]['close']
-    move    = ((c_price - m_open) / m_open * 100) if m_open != 0 else 0
+    move_pct = ((c_price - m_open) / m_open) * 100 if m_open != 0 else 0
 
-    ranges  = df_today['high'] - df_today['low']
-    bodies  = (df_today['close'] - df_today['open']).abs()
-    avg_br  = (bodies / ranges.replace(0, np.nan)).mean()
+    move_ok = ACCUM_MOVE_MIN <= move_pct <= ACCUM_MOVE_MAX
 
-    return (0.8 <= move <= 2.5) and (avg_br >= 0.40)
+    ranges = df_today['high'] - df_today['low']
+    bodies = (df_today['close'] - df_today['open']).abs()
+    avg_body_ratio = (bodies / ranges.replace(0, np.nan)).mean()
+    body_ok = avg_body_ratio >= ACCUM_BODY_AVG
+
+    return move_ok and body_ok
 
 # ============================================================
-#  AUTH & TELEGRAM
+#   AUTH & TELEGRAM
 # ============================================================
 def get_access_token():
     if not args.url:
@@ -578,12 +214,13 @@ def get_access_token():
     try:
         match = re.search(r'auth_code=([^&]+)', args.url)
         if match:
+            auth_code = match.group(1)
             session = fyersModel.SessionModel(
                 client_id=APP_ID, secret_key=SECRET_ID,
                 redirect_uri=REDIRECT_URL,
                 response_type="code", grant_type="authorization_code"
             )
-            session.set_token(match.group(1))
+            session.set_token(auth_code)
             return session.generate_token().get("access_token")
     except Exception as e:
         print(f"Login Error: {e}")
@@ -600,39 +237,40 @@ def send_telegram(msg):
         print(f"Telegram error: {e}")
 
 # ============================================================
-#  OPTION STRIKE SELECTOR
+#   OPTION STRIKE SELECTOR
 # ============================================================
 def get_perfect_strike(symbol, price, side):
-    if   "BANKNIFTY" in symbol: step = 100
-    elif "NIFTY"     in symbol: step = 50
-    elif price > 1000:          step = 10
-    elif price > 500:           step = 5
-    else:                       step = 2.5
+    if "NIFTY" in symbol and "BANK" not in symbol: step = 50
+    elif "BANKNIFTY" in symbol:                    step = 100
+    elif price > 1000:                             step = 10
+    elif price > 500:                              step = 5
+    else:                                          step = 2.5
     atm = round(price / step) * step
     return f"{int(atm + step)} CE" if side == "BUY" else f"{int(atm - step)} PE"
 
 # ============================================================
-#  DAILY RESET
+#   DAILY RESET
 # ============================================================
 def maybe_reset_daily():
     now = datetime.datetime.now()
     if now.hour == 9 and 15 <= now.minute <= 16:
         if notified_stocks:
             notified_stocks.clear()
-            print("✅ Daily reset done")
+            print("✅ Daily reset done — notified_stocks cleared")
 
 # ============================================================
-#  LOGIN
+#   LOGIN
 # ============================================================
 token = get_access_token()
-if not token:
+if token:
+    fyers = fyersModel.FyersModel(client_id=APP_ID, token=token, is_async=False)
+    print("✅ SYSTEM LIVE: Slope + OI + Volume filters active")
+    send_telegram("🚀 *Bot Online v2*: Slope + OI Confirmation + Volume Filter Active")
+else:
     sys.exit("🔴 Login Failed.")
 
-fyers = fyersModel.FyersModel(client_id=APP_ID, token=token, is_async=False)
-print("✅ Fyers connected")
-
 # ============================================================
-#  STOCK UNIVERSE
+#   STOCK UNIVERSE
 # ============================================================
 stocks_list = (
     "360ONE,ABB,ABCAPITAL,ADANIENSOL,ADANIENT,ADANIGREEN,ADANIPORTS,ALKEM,AMBER,"
@@ -662,79 +300,35 @@ stocks_list = (
 stocks = [s.strip() for s in stocks_list.split(",")]
 
 # ============================================================
-#  WEBSOCKET SETUP — subscribe all stocks for live CVD
-# ============================================================
-def start_websocket():
-    try:
-        ws_symbols = [f"NSE:{s}-EQ" for s in stocks]
-
-        fws = data_ws.FyersDataSocket(
-            access_token  = f"{APP_ID}:{token}",
-            write_to_file = False,
-            litemode      = True,    # litemode = LTP + volume only (faster)
-            reconnect     = True,
-            on_message    = ws_on_message,
-            on_error      = ws_on_error,
-            on_connect    = ws_on_connect,
-            on_close      = ws_on_close,
-        )
-
-        # Subscribe in chunks of 200 (API limit per call)
-        def run():
-            fws.connect()
-            # Wait for connection
-            ws_connected.wait(timeout=15)
-            if ws_connected.is_set():
-                for i in range(0, len(ws_symbols), 200):
-                    chunk = ws_symbols[i:i+200]
-                    fws.subscribe(symbols=chunk, data_type="SymbolUpdate")
-                    time.sleep(0.5)
-                print(f"✅ WebSocket subscribed to {len(ws_symbols)} stocks")
-            else:
-                print("⚠ WebSocket connection timeout — using OHLCV CVD fallback")
-
-        t = threading.Thread(target=run, daemon=True)
-        t.start()
-        return True
-    except Exception as e:
-        print(f"⚠ WebSocket start failed: {e} — using OHLCV CVD")
-        return False
-
-# ============================================================
-#  MAIN SCAN
+#   MAIN SCAN
 # ============================================================
 def scan():
     maybe_reset_daily()
-    now   = datetime.datetime.now()
-    today = datetime.date.today()
 
-    # Skip opening noise
+    now = datetime.datetime.now()
+
+    # Skip first 15 minutes — opening noise
     if now.hour == 9 and now.minute < 30:
-        print("⏳ Waiting for 9:30 AM...")
+        print("⏳ Waiting for market to settle (9:30 AM)...")
         return
 
     # Session classification
-    is_prime    = (now.hour < PRIME_END_H) or (now.hour == PRIME_END_H and now.minute < PRIME_END_M)
-    is_extended = not is_prime and (
-        (now.hour < EXTENDED_END_H) or (now.hour == EXTENDED_END_H and now.minute < EXTENDED_END_M)
-    )
-    is_dead = not is_prime and not is_extended
+    is_prime    = (now.hour < PRIME_SESSION_END_H) or (now.hour == PRIME_SESSION_END_H and now.minute < PRIME_SESSION_END_M)
+    is_extended = not is_prime and ((now.hour < EXTENDED_END_H) or (now.hour == EXTENDED_END_H and now.minute < EXTENDED_END_M))
+    is_dead     = not is_prime and not is_extended
 
     if is_dead:
-        print("⛔ Dead zone (after 12:30 PM) — no new entries")
+        print(f"  Dead zone after 12:30 PM — skipping scan")
         return
 
-    # Sell only in first half of prime session
-    sell_allowed_time = now.hour < 11 or (now.hour == 11 and now.minute < 15)
+    session_label = "Prime 9:30-11:30" if is_prime else "Extended 11:30-12:30"
+    print(f"  Session: {session_label}")
 
-    session_tag   = "🟢 Prime" if is_prime else "🟡 Extended"
-    thr           = CHANGE_THRESHOLD if is_prime else EXTENDED_THRESHOLD
-    slp_min       = SLOPE_MIN        if is_prime else EXTENDED_SLOPE_MIN
-
+    today      = datetime.date.today()
     start_date = (today - datetime.timedelta(days=7)).strftime('%Y-%m-%d')
     today_str  = today.strftime('%Y-%m-%d')
 
-    # Nifty regime
+    # --- Nifty regime filter ---
     try:
         n_res = fyers.history({
             "symbol": "NSE:NIFTY50-INDEX", "resolution": "5",
@@ -743,101 +337,102 @@ def scan():
         if n_res['s'] != 'ok':
             print("Nifty data failed"); return
 
-        df_n  = pd.DataFrame(n_res['candles'], columns=['time','open','high','low','close','volume'])
-        df_nt = df_n[pd.to_datetime(df_n['time'], unit='s').dt.date == today]
-        if len(df_nt) < 3: return
+        df_nifty  = pd.DataFrame(n_res['candles'], columns=['time','open','high','low','close','volume'])
+        df_n_today = df_nifty[pd.to_datetime(df_nifty['time'], unit='s').dt.date == today]
+        if len(df_n_today) < 3:
+            return
 
-        n_move = ((df_nt.iloc[-1]['close'] - df_nt.iloc[0]['open']) / df_nt.iloc[0]['open']) * 100
+        n_m_open = df_n_today.iloc[0]['open']
+        n_move   = ((df_n_today.iloc[-1]['close'] - n_m_open) / n_m_open) * 100
     except Exception as e:
-        print(f"Nifty error: {e}"); return
+        print(f"Nifty fetch error: {e}"); return
 
-    ws_warm = ws_connected.is_set()
-    print(f"\n🔍 {len(stocks)} stocks | Nifty: {n_move:+.2f}% | {session_tag} | WS CVD: {'✅' if ws_warm else '⚠ fallback'} | {now.strftime('%H:%M:%S')}")
+    print(f"\n🔍 Scanning {len(stocks)} stocks | Nifty move: {n_move:.2f}% | {now.strftime('%H:%M:%S')}")
 
     signals_found = 0
-    candidates    = []   # collect all passing stocks with scores
 
     for s in stocks:
         try:
             symbol = f"NSE:{s}-EQ"
 
-            # 5-min data
+            # --- Fetch 5-min data ---
             h5 = fyers.history({
                 "symbol": symbol, "resolution": "5",
                 "date_format": "1", "range_from": start_date, "range_to": today_str
             })
-            if h5['s'] != 'ok': continue
+            if h5['s'] != 'ok':
+                continue
 
             df = pd.DataFrame(h5['candles'], columns=['time','open','high','low','close','volume'])
-            if len(df) < 30: continue
+            if len(df) < 30:
+                continue
 
             df['ema5'] = get_ema(df['close'], EMA_LEN)
             df['atr']  = get_atr(df, 14)
 
-            curr = df.iloc[-2]
-            df_t = df[pd.to_datetime(df['time'], unit='s').dt.date == today]
-            if len(df_t) < 3: continue
+            curr   = df.iloc[-2]   # last completed candle
+            df_t   = df[pd.to_datetime(df['time'], unit='s').dt.date == today]
+            if len(df_t) < 3:
+                continue
 
-            # Basic calculations
-            m_open = df_t.iloc[0]['open']
-            s_move = ((curr['close'] - m_open) / m_open * 100) if m_open != 0 else 0
+            # ── Day move ──
+            m_open  = df_t.iloc[0]['open']
+            s_move  = ((curr['close'] - m_open) / m_open) * 100 if m_open != 0 else 0
 
+            # ── Fresh high / low ──
             is_fresh_high = curr['close'] > df.iloc[-(LOOKBACK+2):-2]['high'].max()
             is_fresh_low  = curr['close'] < df.iloc[-(LOOKBACK+2):-2]['low'].min()
 
-            c_rng        = curr['high'] - curr['low']
-            is_strong    = c_rng > 0 and (abs(curr['close'] - curr['open']) / c_rng) >= BODY_RATIO_MIN
-            is_not_spike = c_rng <= curr['atr'] * ATR_SPIKE_MULT
+            # ── Strong candle body ──
+            c_rng     = curr['high'] - curr['low']
+            is_strong = c_rng > 0 and (abs(curr['close'] - curr['open']) / c_rng) >= BODY_RATIO_MIN
 
-            slope        = get_slope_pct(df['close'], SLOPE_PERIOD)
-            is_45_buy    = slp_min <=  slope <= SLOPE_MAX
-            is_45_sell   = slp_min <= -slope <= SLOPE_MAX
+            # ── ATR spike filter ──
+            is_not_spike = c_rng <= (curr['atr'] * ATR_SPIKE_MULT)
 
-            avg_vol      = df['volume'].rolling(VOL_AVG_PERIOD).mean().iloc[-2]
-            vol_ratio    = curr['volume'] / avg_vol if avg_vol > 0 else 0
-            is_vol_surge = vol_ratio >= VOL_SURGE_MULT
-
+            # ── EMA pullback ──
             d_ema_b   = (curr['low']  - curr['ema5']) / curr['ema5'] * 100
             d_ema_s   = (curr['ema5'] - curr['high']) / curr['ema5'] * 100
             is_buy_pb = curr['low'] <= curr['ema5'] or (d_ema_b <= PULLBACK_BUFFER and curr['low'] > curr['ema5'])
             is_sell_pb= curr['high'] >= curr['ema5'] or (d_ema_s <= PULLBACK_BUFFER and curr['high'] < curr['ema5'])
 
-            r_buy  = not (n_move < -NIFTY_LIMIT and s_move < n_move * 0.4)
-            w_sell = not (n_move >  NIFTY_LIMIT and s_move > n_move * 0.4)
+            # ── Nifty regime ──
+            r_buy  = not (n_move < -NIFTY_LIMIT and s_move < (n_move * 0.4))
+            w_sell = not (n_move >  NIFTY_LIMIT and s_move > (n_move * 0.4))
 
+            # ── NEW: Volume surge ──
+            avg_vol      = df['volume'].rolling(VOL_AVG_PERIOD).mean().iloc[-2]
+            is_vol_surge = curr['volume'] > avg_vol * VOL_SURGE_MULT
+
+            # ── NEW: Slope / 45° angle ──
+            slope         = get_slope_pct(df['close'], SLOPE_PERIOD)
+            is_45_buy     = SLOPE_MIN <=  slope <= SLOPE_MAX
+            is_45_sell    = SLOPE_MIN <= -slope <= SLOPE_MAX  # negative slope for sell
+
+            # ── NEW: Slow accumulation (morning filter) ──
             accum_ok = is_slow_accumulation(df_t)
 
-            # CVD — WebSocket if warm, else OHLCV fallback
-            ws_cvd_norm = get_ws_cvd_slope(symbol)
-            if ws_cvd_norm is not None:
-                cvd_slope_norm = ws_cvd_norm
-                cvd_rising     = cvd_slope_norm >= CVD_SLOPE_BULL
-                cvd_falling    = cvd_slope_norm <= CVD_SLOPE_BEAR
-                is_fake_rally  = s_move > 0 and cvd_slope_norm < -0.5
-                is_fake_drop   = s_move < 0 and cvd_slope_norm >  0.5
-            else:
-                # OHLCV fallback
-                ohlcv_cvd      = get_ohlcv_cvd(df, period=8)
-                cvd_slope_norm = ohlcv_cvd
-                cvd_rising     = ohlcv_cvd >  0.5
-                cvd_falling    = ohlcv_cvd < -0.5
-                is_fake_rally  = s_move > 0 and ohlcv_cvd < -1.0
-                is_fake_drop   = s_move < 0 and ohlcv_cvd >  1.0
-
-            # SL / TP
+            # ── ATR-based SL and TP ──
             atr_val = curr['atr']
             buy_sl  = round(curr['close'] - atr_val * ATR_SL_MULT, 2)
             buy_tp  = round(curr['close'] + atr_val * ATR_TP_MULT, 2)
             sell_sl = round(curr['close'] + atr_val * ATR_SL_MULT, 2)
             sell_tp = round(curr['close'] - atr_val * ATR_TP_MULT, 2)
 
+            # ── Notified tracker init ──
             if s not in notified_stocks:
                 notified_stocks[s] = {'b': 0, 's': 0, 'last': 0}
 
             # ── SIGNAL DECISION ──
             signal = None
 
-            buy_ok = (
+            # Session-aware thresholds — stricter after 11:30 AM
+            thr       = CHANGE_THRESHOLD if is_prime else EXTENDED_THRESHOLD
+            slp_min   = SLOPE_MIN        if is_prime else EXTENDED_SLOPE_MIN
+            is_45_buy_s  = slp_min <=  slope <= SLOPE_MAX
+            is_45_sell_s = slp_min <= -slope <= SLOPE_MAX
+
+            buy_base = (
                 s_move >= thr
                 and is_fresh_high
                 and is_strong
@@ -846,14 +441,12 @@ def scan():
                 and is_buy_pb
                 and curr['close'] > curr['ema5']
                 and is_vol_surge
-                and is_45_buy
+                and is_45_buy_s
                 and accum_ok
-                and cvd_rising
-                and not is_fake_rally
                 and notified_stocks[s]['b'] < MAX_SIGNALS
             )
 
-            sell_ok = (
+            sell_base = (
                 s_move <= -thr
                 and is_fresh_low
                 and is_strong
@@ -862,151 +455,83 @@ def scan():
                 and is_sell_pb
                 and curr['close'] < curr['ema5']
                 and is_vol_surge
-                and is_45_sell
+                and is_45_sell_s
                 and accum_ok
-                and cvd_falling
-                and not is_fake_drop
-                and sell_allowed_time       # sell only before 11:15 AM
                 and notified_stocks[s]['s'] < MAX_SIGNALS
             )
 
-            if buy_ok:   signal = "BUY"
-            elif sell_ok: signal = "SELL"
+            if buy_base:
+                signal = "BUY"
+            elif sell_base:
+                signal = "SELL"
 
-            if not signal: continue
-            if curr['time'] <= notified_stocks[s]['last'] + 300: continue
+            # ── OI confirmation (only if base signal fires) ──
+            if signal and curr['time'] > notified_stocks[s]['last'] + 300:
 
-            # ── PULLBACK BOTTOM DETECTION ──
-            pb_valid, pb_score, pb_depth, pb_details = detect_pullback_bottom(df, df_t, signal)
-            # Pullback bottom = bonus score + priority
-            # Non-pullback signals still pass but get lower score
+                oi_confirmed, oi_msg, oi_score = get_oi_confirmation(fyers, symbol, signal)
+                session_tag = "Prime" if is_prime else "Extended"
+                signal_strength = "🔥 STRONG" if oi_confirmed else "⚡ MODERATE"
 
-            # Multi-timeframe confirm
-            mtf = get_15min_trend(fyers, symbol, today, start_date, today_str)
-            if signal == 'BUY'  and mtf == 'BEAR': continue   # 15-min against us
-            if signal == 'SELL' and mtf == 'BULL': continue
+                # Only send STRONG signals — or allow MODERATE too?
+                # Comment out next 2 lines to allow MODERATE signals too
+                if not oi_confirmed:
+                    print(f"  ⚡ {s} {signal} — OI not confirmed ({oi_msg}), skipping")
+                    continue
 
-            # Stock Score — pullback adds 15 bonus points
-            score, breakdown = score_stock(
-                s_move, slope, cvd_slope_norm, vol_ratio,
-                is_fresh_high if signal=='BUY' else is_fresh_low,
-                is_strong, is_not_spike,
-                curr['close'] > curr['ema5'],
-                mtf, signal
-            )
-            
-            # Pullback bonus
-            if pb_valid:
-                score = min(score + 15, 100)
-                breakdown['pullback'] = pb_score
-            else:
-                breakdown['pullback'] = 0
+                notified_stocks[s]['last'] = curr['time']
+                if signal == "BUY":
+                    notified_stocks[s]['b'] += 1
+                    sl, tp = buy_sl, buy_tp
+                else:
+                    notified_stocks[s]['s'] += 1
+                    sl, tp = sell_sl, sell_tp
 
-            if score < MIN_SCORE_TO_ALERT:
-                print(f"  ⬇ {s} {signal} score {score}/100 — below threshold, skip")
-                continue
+                rr = round(abs(tp - curr['close']) / abs(sl - curr['close']), 1) if abs(sl - curr['close']) > 0 else 0
+                perfect_option = get_perfect_strike(s, curr['close'], signal)
 
-            # Collect candidate
-            candidates.append({
-                's': s, 'symbol': symbol, 'signal': signal,
-                'score': score, 'breakdown': breakdown,
-                'curr': curr, 's_move': s_move, 'slope': slope,
-                'cvd_slope_norm': cvd_slope_norm, 'vol_ratio': vol_ratio,
-                'mtf': mtf, 'buy_sl': buy_sl, 'buy_tp': buy_tp,
-                'sell_sl': sell_sl, 'sell_tp': sell_tp,
-                'avg_vol': avg_vol, 'session_tag': session_tag,
-                'ws_cvd': ws_cvd_norm is not None,
-                'pb_valid': pb_valid, 'pb_score': pb_score,
-                'pb_depth': pb_depth, 'pb_details': pb_details
-            })
+                msg = (
+                    f"{'🚀' if signal == 'BUY' else '📉'} {signal_strength} *{signal}*: `{s}`\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"💰 Price  : ₹{curr['close']}\n"
+                    f"📊 Day Move: {s_move:.2f}%\n"
+                    f"📐 Slope  : {slope:+.3f}% per candle\n"
+                    f"📦 Volume : {curr['volume']:,.0f} ({curr['volume']/avg_vol:.1f}x avg)\n"
+                    f"🔄 OI     : {oi_msg}\n"
+                    f"🎯 Option : `{perfect_option}`\n"
+                    f"🛡 SL     : ₹{sl}  |  🎯 TP: ₹{tp}\n"
+                    f"⚖️ RR     : 1:{rr}"
+                )
+                send_telegram(msg)
+                print(f"  ✅ Alert sent: {s} {signal} | OI: {oi_msg} | Slope: {slope:.3f}")
+                signals_found += 1
 
             time.sleep(0.05)
 
         except Exception as e:
-            print(f"  ⚠ [{s}]: {e}")
+            print(f"  ⚠ Error [{s}]: {e}")
             continue
 
-    # ── SORT BY SCORE — send top signals only ──
-    # Sort — pullback bottom stocks get priority (score + 15 already added)
-    # Secondary sort: pullback valid first
-    candidates.sort(key=lambda x: (x['pb_valid'], x['score']), reverse=True)
-
-    for c in candidates:
-        s = c['s']
-
-        # OI confirmation — only for top candidates
-        oi_confirmed, oi_msg, oi_score = get_oi_confirmation(fyers, c['symbol'], c['signal'])
-
-        if not oi_confirmed:
-            print(f"  ⚡ {s} {c['signal']} score={c['score']} — OI not confirmed, skip")
-            continue
-
-        notified_stocks[s]['last'] = int(c['curr']['time'])
-        sl = c['buy_sl']  if c['signal'] == 'BUY' else c['sell_sl']
-        tp = c['buy_tp']  if c['signal'] == 'BUY' else c['sell_tp']
-        rr = round(abs(tp - c['curr']['close']) / max(abs(sl - c['curr']['close']), 0.01), 1)
-
-        if c['signal'] == 'BUY':  notified_stocks[s]['b'] += 1
-        else:                      notified_stocks[s]['s'] += 1
-
-        perfect_option = get_perfect_strike(s, c['curr']['close'], c['signal'])
-        cvd_src = "WS" if c['ws_cvd'] else "OHLCV"
-        emoji   = "🚀" if c['signal'] == 'BUY' else "📉"
-        pb_tag  = "📍 *PULLBACK BOTTOM*" if c.get('pb_valid') else "📈 Momentum"
-
-        bd = c['breakdown']
-        msg = (
-            f"{emoji} 🔥 *STRONG {c['signal']}*: `{s}` {c['session_tag']}\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"{pb_tag}\n"
-            f"⭐ Score  : *{c['score']}/100*\n"
-            f"💰 Price  : ₹{c['curr']['close']}\n"
-            f"📊 Move   : {c['s_move']:+.2f}%\n"
-            f"📐 Slope  : {c['slope']:+.3f}%/candle\n"
-            f"📦 Volume : {c['vol_ratio']:.1f}x avg\n"
-            f"🌊 CVD    : {c['cvd_slope_norm']:+.2f} [{cvd_src}]\n"
-            f"📈 15-min : {c['mtf']}\n"
-            f"🔄 OI     : {oi_msg}\n"
-            f"🎯 Option : `{perfect_option}`\n"
-            f"🛡 SL     : ₹{sl}  |  🎯 TP: ₹{tp}\n"
-            f"⚖️ RR     : 1:{rr}\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"📋 _Move:{bd['move']} Slope:{bd['slope']} CVD:{bd['cvd']} Vol:{bd['volume']} PB:{bd.get('pullback',0)} MTF:{bd['mtf']}_"
-        )
-        send_telegram(msg)
-        print(f"  ✅ ALERT: {s} {c['signal']} | Score:{c['score']} | OI:{oi_msg} | CVD:{c['cvd_slope_norm']:+.2f} | MTF:{c['mtf']}")
-        signals_found += 1
-
-    print(f"  → Done. {len(candidates)} candidates, {signals_found} alerts sent.")
+    print(f"  → Scan complete. {signals_found} signal(s) sent.")
 
 # ============================================================
-#  MAIN
+#   MAIN LOOP
 # ============================================================
-print("=" * 55)
-print("  TRADING BOT v3 — WebSocket CVD + Scoring System")
-print("=" * 55)
-
-send_telegram(
-    "🚀 *Bot v3 Online*\n"
-    "WebSocket CVD + Stock Scoring + Multi-timeframe\n"
-    "Sirf 70+ score + OI confirmed signals aayenge"
-)
-
-# Start WebSocket in background
-ws_started = start_websocket()
-print("⏳ Warming up WebSocket CVD (30 sec)...")
-time.sleep(10)   # let WebSocket collect some ticks before first scan
+print("=" * 50)
+print("  TRADING BOT v2 — Slope + OI + Volume")
+print("=" * 50)
 
 while True:
     now = datetime.datetime.now()
 
+    # Stop after 3:30 PM
     if now.hour == 15 and now.minute >= 30:
-        send_telegram("🔴 *Bot v3 Offline* — Market closed")
-        print("Market closed. Stopping.")
+        send_telegram("🔴 *Bot Offline* — Market closed (3:30 PM)")
+        print("Market closed. Bot stopping.")
         break
 
+    # Run scan every 5 minutes at :05 seconds
     if now.minute % 5 == 0 and 4 <= now.second <= 8:
         scan()
-        time.sleep(15)
+        time.sleep(15)  # prevent double-trigger in same minute
 
     time.sleep(1)
